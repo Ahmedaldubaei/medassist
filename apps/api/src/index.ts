@@ -11,6 +11,7 @@ import { ragRoutes } from './routes/rag.js';
 import { chatRoutes } from './routes/chat.js';
 import { conversationRoutes } from './routes/conversations.js';
 import { clinicalRoutes } from './routes/clinical.js';
+import { getEmbedProvider } from './rag/embeddings.js';
 
 export function buildApp() {
   const app = Fastify({ logger: config.NODE_ENV !== 'test' });
@@ -56,6 +57,18 @@ async function main() {
   try {
     await app.listen({ port: config.PORT, host: '0.0.0.0' });
     app.log.info(`API listening on port ${config.PORT}`);
+    // Best-effort warmup: the local Xenova embedding model lazy-loads on
+    // first query (big cold-start on small instances). Fire-and-forget —
+    // a failure here must never affect boot.
+    void (async () => {
+      try {
+        const provider = await getEmbedProvider();
+        await provider.embed(['warmup'], 'query');
+        app.log.info({ provider: provider.name }, 'embedding provider warmed up');
+      } catch (err) {
+        app.log.warn({ err: String(err) }, 'embedding warmup failed (non-fatal)');
+      }
+    })();
   } catch (err) {
     app.log.error(err);
     await prisma.$disconnect();

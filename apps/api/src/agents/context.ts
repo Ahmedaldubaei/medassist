@@ -82,8 +82,16 @@ export function formatChunksForPrompt(chunks: RetrievalResult[]): string {
     .join('\n\n');
 }
 
-export function noEvidenceResponse(lang: Lang): string {
+/**
+ * Honest gap + conversation continuer (replaces the old dead-end).
+ * Never fabricates: states the gap, then keeps the discussion alive
+ * with a follow-up question. Optional `query` makes it personal.
+ */
+export function noEvidenceResponse(lang: Lang, query?: string): string {
+  const topic = query ? `«${query.trim().slice(0, 120)}»` : '';
   return lang === 'ar'
-    ? 'لم أجد إجابة في المصادر الموثقة المتاحة لدي. أعد صياغة السؤال أو حدد الموضوع بدقة أكبر.'
-    : 'Not found in the verified sources available to me. Rephrase the question or narrow the topic.';
+    ? `لم أجد معلومات موثقة عن هذا ${topic ? `(${topic}) ` : ''}في مصادري الحالية، ولن أخترع إجابة. ` +
+      `لكن يسعدني أن نناقش الموضوع: ما الذي تريد استكشافه تحديدًا — المبادئ العامة، مقارنة بين الخيارات، أم نقطة معينة تشغل بالك؟`
+    : `I could not find verified information on this ${topic ? `(${topic}) ` : ''}in my current sources, and I will not invent an answer. ` +
+      `But I am happy to discuss the topic: what would you like to explore — the general principles, a comparison of options, or a specific point on your mind?`;
 }

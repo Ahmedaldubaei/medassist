@@ -15,7 +15,7 @@ export async function runKnowledgeAgent(input: AgentRunInput): Promise<AgentRunO
   const def = getAgent('knowledge');
   const chunks = await retrieveChunks(input.query, def, input.embedProvider, input.timings);
   if (chunks.length === 0) {
-    return { draft: noEvidenceResponse(input.lang), chunks, agentId: 'knowledge' };
+    return { draft: noEvidenceResponse(input.lang, input.query), chunks, agentId: 'knowledge' };
   }
   const { text } = await input.llm.complete(
     [

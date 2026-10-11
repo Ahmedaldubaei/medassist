@@ -67,6 +67,29 @@ describe('route', () => {
     expect(d.agentId).toBe('anesthesiology');
     expect(d.lang).toBe('en');
   });
+  it.each([
+    'اريد مساعدتكم في حاله تحتاج تخدير موضعي',
+    'ما هي مضاعفات التخدير الموضعي؟',
+    'التخدير الشوكي لعملية قيصرية',
+    'حصار العصب الفخذي بعد جراحة الركبة',
+    'التخدير فوق الجافية أثناء الولادة',
+    'الحصار العصبي في جراحة الكتف',
+  ])('routes regional-anesthesia Arabic terms to anesthesiology: %s', (q) => {
+    const d = route(q);
+    expect(d.agentId).toBe('anesthesiology');
+    expect(d.emergency).toBeNull();
+  });
+  it.each([
+    'local anesthesia for hand surgery',
+    'neuraxial techniques compared',
+    'peripheral nerve block complications',
+    'spinal anesthesia in elderly',
+    'epidural anesthesia for labor',
+  ])('routes regional-anesthesia English terms to anesthesiology: %s', (q) => {
+    const d = route(q);
+    expect(d.agentId).toBe('anesthesiology');
+    expect(d.emergency).toBeNull();
+  });
   it('routes greetings to the assistant agent', () => {
     expect(route('مرحبا').agentId).toBe('assistant');
     expect(route('hello').agentId).toBe('assistant');

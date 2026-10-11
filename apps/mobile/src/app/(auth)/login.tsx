@@ -33,7 +33,7 @@ export default function LoginScreen() {
       await signIn(token, user);
       router.replace('/(app)');
     } catch (err) {
-      setApiError(err instanceof ApiError && err.status === 401 ? t(lang, 'auth.errLogin') : t(lang, 'auth.errLogin'));
+      setApiError(err instanceof ApiError ? t(lang, 'auth.errLogin') : t(lang, 'auth.errNetwork'));
     } finally {
       setLoading(false);
     }

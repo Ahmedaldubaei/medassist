@@ -38,7 +38,8 @@ export default function RegisterScreen() {
       router.replace('/(app)');
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) setApiError(t(lang, 'auth.errEmailInUse'));
-      else setApiError(t(lang, 'auth.errRegister'));
+      else if (err instanceof ApiError) setApiError(t(lang, 'auth.errRegister'));
+      else setApiError(t(lang, 'auth.errNetwork'));
     } finally {
       setLoading(false);
     }

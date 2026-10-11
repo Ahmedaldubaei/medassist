@@ -23,7 +23,7 @@ import { router } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 import * as Google from 'expo-auth-session/providers/google';
 import { MaterialIcons } from '@expo/vector-icons';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { t } from '../i18n';
 import { colors, fontFamily, fontSize, radius, spacing } from '../theme';
@@ -58,8 +58,8 @@ export function GoogleSignInButton() {
         const { token, user } = await api.googleLogin({ idToken });
         await signIn(token, user);
         router.replace('/(app)');
-      } catch {
-        setError(t(lang, 'auth.errGoogle'));
+      } catch (err) {
+        setError(t(lang, err instanceof ApiError ? 'auth.errGoogle' : 'auth.errNetwork'));
       } finally {
         setBusy(false);
       }

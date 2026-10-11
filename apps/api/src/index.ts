@@ -1,4 +1,5 @@
 import Fastify from 'fastify';
+import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import { config } from './config.js';
 import { prisma } from './db.js';
@@ -13,6 +14,19 @@ import { clinicalRoutes } from './routes/clinical.js';
 
 export function buildApp() {
   const app = Fastify({ logger: config.NODE_ENV !== 'test' });
+
+  // CORS must be registered before routes so browser preflights (OPTIONS)
+  // from the web app are answered. Without this, every web API call is
+  // blocked by the browser and surfaces as a misleading "network" error.
+  app.register(cors, {
+    origin: [
+      'https://medassist-app-sun3.onrender.com',
+      'http://localhost:8081',
+      'http://localhost:19006',
+    ],
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  });
 
   app.register(errorPlugin);
   app.register(authPlugin);

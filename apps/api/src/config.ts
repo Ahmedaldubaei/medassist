@@ -6,7 +6,7 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
-  JWT_EXPIRES_IN: z.string().default('7d'),
+  JWT_EXPIRES_IN: z.string().default('365d'),
   // --- RAG / embeddings ---
   // 'hf'    -> HuggingFace Inference API, intfloat/multilingual-e5-large (1024 dims).
   //            Requires an HF token with Inference Providers permission.
@@ -31,6 +31,17 @@ const envSchema = z.object({
   // 'keyword'      -> deterministic token-overlap + contrast guard (default, offline)
   // 'crossencoder' -> Xenova/ms-marco-MiniLM-L-6-v2 via transformers.js (opt-in)
   RERANK_PROVIDER: z.enum(['keyword', 'crossencoder']).default('keyword'),
+  // --- Google Sign-In ---
+  // Web OAuth client ID from the MedAssist GCP project. Empty = Google sign-in disabled.
+  GOOGLE_CLIENT_ID: z.string().default(''),
+  // --- Email (Resend) ---
+  // Empty = email sending disabled (registration still succeeds; a warning is logged).
+  RESEND_API_KEY: z.string().default(''),
+  // NOTE: onboarding@resend.dev is Resend's sandbox sender — it only delivers to
+  // the account owner's email. Replace with a verified domain sender for production.
+  RESEND_FROM: z.string().default('MedAssist <onboarding@resend.dev>'),
+  // Public URL of the web app, used to build email verification links.
+  APP_WEB_URL: z.string().default('https://medassist-app-sun3.onrender.com'),
 });
 
 export type Config = z.infer<typeof envSchema>;

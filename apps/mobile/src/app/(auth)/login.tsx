@@ -8,8 +8,9 @@ import { MaterialIcons } from '@expo/vector-icons';
 import { api, ApiError } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { t } from '../../i18n';
-import { colors, fontFamily, fontSize, radius, spacing } from '../../theme';
+import { colors, fontFamily, fontSize, spacing } from '../../theme';
 import { ErrorBanner, Field, PrimaryButton } from '../../components/ui';
+import { GoogleSignInButton } from '../../components/GoogleSignInButton';
 
 export default function LoginScreen() {
   const { signIn, lang } = useAuth();
@@ -72,12 +73,20 @@ export default function LoginScreen() {
         />
 
         <PrimaryButton title={t(lang, 'auth.loginButton')} onPress={submit} loading={loading} />
+        <GoogleSignInButton />
 
         <View style={styles.switchRow}>
           <Text style={styles.switchText}>{t(lang, 'auth.noAccount')} </Text>
           <Link href="/(auth)/register" asChild>
             <TouchableOpacity>
               <Text style={styles.switchLink}>{t(lang, 'auth.signUpLink')}</Text>
+            </TouchableOpacity>
+          </Link>
+        </View>
+        <View style={styles.switchRow}>
+          <Link href="/(auth)/forgot-password" asChild>
+            <TouchableOpacity>
+              <Text style={styles.switchLink}>{t(lang, 'auth.forgotPassword')}</Text>
             </TouchableOpacity>
           </Link>
         </View>

@@ -205,4 +205,68 @@ describe('conversation history endpoints', () => {
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it('deletes an owned conversation with its messages and writes an audit log', async () => {
+    const token = await registerAndLogin(app, 'del@example.com');
+    const me = await app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/me',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const userId = me.json().user.id as string;
+    const conv = await seedConversation(userId, 'to delete', 3);
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/conversations/${conv.id}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+
+    expect(await prisma.conversation.findUnique({ where: { id: conv.id } })).toBeNull();
+    expect(await prisma.message.count({ where: { conversationId: conv.id } })).toBe(0);
+    const audit = await prisma.auditLog.findFirst({
+      where: { userId, action: 'conversation.delete' },
+    });
+    expect(audit).not.toBeNull();
+  });
+
+  it('returns 404 when deleting another user\u2019s conversation', async () => {
+    const tokenA = await registerAndLogin(app, 'delA@example.com');
+    const tokenB = await registerAndLogin(app, 'delB@example.com');
+    const meA = await app.inject({
+      method: 'GET',
+      url: '/api/v1/auth/me',
+      headers: { authorization: `Bearer ${tokenA}` },
+    });
+    const conv = await seedConversation(meA.json().user.id as string, 'private', 1);
+
+    const res = await app.inject({
+      method: 'DELETE',
+      url: `/api/v1/conversations/${conv.id}`,
+      headers: { authorization: `Bearer ${tokenB}` },
+    });
+    expect(res.statusCode).toBe(404);
+    // Still intact for the owner.
+    expect(await prisma.conversation.findUnique({ where: { id: conv.id } })).not.toBeNull();
+  });
+
+  it('returns 404 when deleting a nonexistent conversation', async () => {
+    const token = await registerAndLogin(app, 'delNone@example.com');
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/api/v1/conversations/cl000000000000000000000000',
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it('rejects unauthenticated delete with 401', async () => {
+    const res = await app.inject({
+      method: 'DELETE',
+      url: '/api/v1/conversations/cl000000000000000000000000',
+    });
+    expect(res.statusCode).toBe(401);
+  });
 });

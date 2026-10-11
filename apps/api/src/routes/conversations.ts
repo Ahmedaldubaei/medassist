@@ -112,4 +112,37 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
       });
     },
   );
+
+  // Delete a conversation — strictly scoped to the caller's own conversations.
+  // Messages, agent runs and safety reviews cascade via the schema.
+  app.delete(
+    '/api/v1/conversations/:id',
+    {
+      preHandler: [app.authenticate],
+      config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    },
+    async (request, reply) => {
+      const params = conversationIdParam.parse(request.params);
+      const userId = request.user!.sub;
+
+      const conversation = await prisma.conversation.findFirst({
+        where: { id: params.id, userId },
+        select: { id: true },
+      });
+      if (!conversation) {
+        return reply.code(404).send({
+          error: { code: 'NOT_FOUND', message: 'Conversation not found' },
+        });
+      }
+
+      await prisma.$transaction([
+        prisma.conversation.delete({ where: { id: params.id } }),
+        prisma.auditLog.create({
+          data: { userId, action: 'conversation.delete', detailsJson: { conversationId: params.id } },
+        }),
+      ]);
+
+      return reply.send({ ok: true });
+    },
+  );
 }

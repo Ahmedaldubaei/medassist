@@ -67,7 +67,8 @@ export async function runChat(
     : null;
   if (!conv) {
     conv = await prisma.conversation.create({
-      data: { userId, title: message.slice(0, 60) },
+      // Deterministic title from the first user message (~40 chars, no LLM call).
+      data: { userId, title: message.trim().slice(0, 40) || 'محادثة جديدة' },
     });
   }
   await prisma.message.create({

@@ -10,6 +10,7 @@ import { useAuth } from '../../auth/AuthContext';
 import { t } from '../../i18n';
 import { colors, fontFamily, fontSize, spacing } from '../../theme';
 import { ErrorBanner, Field, PrimaryButton } from '../../components/ui';
+import { GoogleSignInButton } from '../../components/GoogleSignInButton';
 
 export default function RegisterScreen() {
   const { signIn, lang } = useAuth();
@@ -83,6 +84,7 @@ export default function RegisterScreen() {
         />
 
         <PrimaryButton title={t(lang, 'auth.registerButton')} onPress={submit} loading={loading} />
+        <GoogleSignInButton />
 
         <View style={styles.switchRow}>
           <Text style={styles.switchText}>{t(lang, 'auth.haveAccount')} </Text>

@@ -13,9 +13,9 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useNavigation, router } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
-import { api, historyStore, type ChatMessage, type ConversationSummary } from '../../../api/client';
+import { api, type ChatMessage, type ChatResponse, type ConversationMessageItem } from '../../../api/client';
 import { useAuth } from '../../../auth/AuthContext';
 import { t } from '../../../i18n';
 import { colors, fontFamily, fontSize, radius, spacing } from '../../../theme';
@@ -37,6 +37,25 @@ function TypingBubble() {
   );
 }
 
+function toChatMessage(m: ConversationMessageItem, conversationId: string): ChatMessage {
+  const role = m.role === 'USER' ? 'user' : 'assistant';
+  const base = { id: m.id, text: m.content, createdAt: Date.parse(m.createdAt) };
+  if (role === 'assistant') {
+    const chat: ChatResponse = {
+      answer: m.content,
+      citations: m.citations ?? [],
+      confidence: m.confidence ?? 0,
+      disclaimer: '',
+      agentUsed: m.agentUsed ?? '',
+      safetyVerdict: 'PASS',
+      conversationId,
+      escalated: false,
+    };
+    return { ...base, role, chat };
+  }
+  return { ...base, role };
+}
+
 export default function ChatScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { token, lang } = useAuth();
@@ -44,42 +63,55 @@ export default function ChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [streamActive, setStreamActive] = useState(false);
   const [error, setError] = useState('');
   const [conversationId, setConversationId] = useState<string | undefined>(id === 'new' ? undefined : id);
   const listRef = useRef<FlatList>(null);
+  const navigation = useNavigation();
 
-  // Load cached conversation.
+  // "New chat" action reachable from the chat screen header.
   useEffect(() => {
-    if (id === 'new') {
-      setMessages([]);
-      setConversationId(undefined);
-      return;
-    }
-    historyStore.get().then((list) => {
-      const conv = list.find((c) => c.id === id);
-      if (conv) {
-        setMessages(conv.messages);
-        setConversationId(conv.id);
-      }
+    navigation.setOptions({
+      headerRight: () => (
+        <TouchableOpacity
+          onPress={() => router.push('/(app)/chat/new')}
+          hitSlop={12}
+          accessibilityLabel={t(lang, 'chat.new')}
+        >
+          <MaterialIcons name="add" size={24} color={colors.navy} />
+        </TouchableOpacity>
+      ),
     });
-  }, [id]);
+  }, [navigation, lang]);
 
-  const persist = useCallback(
-    async (convId: string, msgs: ChatMessage[]) => {
-      const list = await historyStore.get();
-      const title = msgs.find((m) => m.role === 'user')?.text.slice(0, 60) ?? convId.slice(0, 8);
-      const summary: ConversationSummary = {
-        id: convId,
-        title,
-        createdAt: list.find((c) => c.id === convId)?.createdAt ?? Date.now(),
-        updatedAt: Date.now(),
-        messages: msgs,
-      };
-      const next = [summary, ...list.filter((c) => c.id !== convId)];
-      await historyStore.set(next);
-    },
-    [],
-  );
+  // Reset per-conversation state when navigating between conversations
+  // (documented "adjust state during render" pattern — no effect needed).
+  const [activeId, setActiveId] = useState(id);
+  if (activeId !== id) {
+    setActiveId(id);
+    setMessages([]);
+    setConversationId(id === 'new' ? undefined : id);
+  }
+
+  // Load the conversation's messages from the backend (per-account, server-scoped).
+  useEffect(() => {
+    if (id === 'new' || !token) return;
+    let alive = true;
+    api.conversations
+      .messages(token, id, { limit: 100 })
+      .then((res) => {
+        if (!alive) return;
+        setError('');
+        setMessages(res.messages.map((m) => toChatMessage(m, id)));
+        setConversationId(id);
+      })
+      .catch(() => {
+        if (alive) setError(t(lang, 'chat.errLoad'));
+      });
+    return () => {
+      alive = false;
+    };
+  }, [id, token, lang]);
 
   const send = useCallback(async () => {
     const text = input.trim();
@@ -88,29 +120,65 @@ export default function ChatScreen() {
     setError('');
     const userMsg: ChatMessage = { id: nextId(), role: 'user', text, createdAt: Date.now() };
     const withUser = [...messages, userMsg];
-    setMessages(withUser);
+    // Placeholder assistant message, filled in live as SSE tokens arrive.
+    const assistantId = nextId();
+    const placeholder: ChatMessage = {
+      id: assistantId,
+      role: 'assistant',
+      text: '',
+      createdAt: Date.now(),
+    };
+    setMessages([...withUser, placeholder]);
     setSending(true);
+    setStreamActive(false);
     try {
-      const res = await api.chat(token, { message: text, conversationId });
-      const convId = res.conversationId;
-      setConversationId(convId);
-      const assistantMsg: ChatMessage = {
-        id: nextId(),
-        role: 'assistant',
-        text: res.answer,
-        createdAt: Date.now(),
-        chat: res,
+      let streamed = '';
+      const meta = await api.chatStream(token, { message: text, conversationId }, (tok) => {
+        streamed += tok;
+        const snapshot = streamed;
+        setStreamActive(true);
+        setMessages((prev) =>
+          prev.map((m) => (m.id === assistantId ? { ...m, text: snapshot } : m)),
+        );
+      });
+      setConversationId(meta.conversationId);
+      const chat: ChatResponse = {
+        answer: streamed,
+        citations: meta.citations,
+        confidence: meta.confidence,
+        disclaimer: meta.disclaimer,
+        agentUsed: meta.agentUsed,
+        safetyVerdict: meta.safetyVerdict,
+        conversationId: meta.conversationId,
+        escalated: meta.escalated,
       };
-      const final = [...withUser, assistantMsg];
-      setMessages(final);
-      await persist(convId, final);
+      const finalText = streamed;
+      setMessages((prev) =>
+        prev.map((m) => (m.id === assistantId ? { ...m, text: finalText, chat } : m)),
+      );
+      // The backend persists the exchange server-side; no local cache needed.
     } catch {
-      setError(t(lang, 'chat.error'));
-      setMessages(withUser);
+      // Streaming failed or unsupported — fall back to the non-streaming endpoint.
+      try {
+        const res = await api.chat(token, { message: text, conversationId });
+        setConversationId(res.conversationId);
+        const assistantMsg: ChatMessage = {
+          id: assistantId,
+          role: 'assistant',
+          text: res.answer,
+          createdAt: Date.now(),
+          chat: res,
+        };
+        setMessages([...withUser, assistantMsg]);
+      } catch {
+        setError(t(lang, 'chat.error'));
+        setMessages(withUser);
+      }
     } finally {
       setSending(false);
+      setStreamActive(false);
     }
-  }, [input, sending, token, messages, conversationId, lang, persist]);
+  }, [input, sending, token, messages, conversationId, lang]);
 
   const renderItem = ({ item }: { item: ChatMessage }) => {
     if (item.role === 'user') {
@@ -149,7 +217,7 @@ export default function ChatScreen() {
         renderItem={renderItem}
         contentContainerStyle={styles.list}
         onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
-        ListFooterComponent={sending ? <TypingBubble /> : null}
+        ListFooterComponent={sending && !streamActive ? <TypingBubble /> : null}
       />
       <View style={styles.composer}>
         <TextInput

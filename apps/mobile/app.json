@@ -1,1 +1,44 @@
-{"expo":{"android":{"adaptiveIcon":{"backgroundColor":"#0E7C7B","foregroundImage":"./assets/icon.png"},"package":"com.medassist.anesthesia"},"icon":"./assets/icon.png","ios":{"bundleIdentifier":"com.medassist.anesthesia","supportsTablet":true},"name":"MedAssist — مساعد التخدير الذكي","orientation":"portrait","plugins":["expo-router","expo-status-bar","expo-secure-store","expo-font"],"scheme":"medassist","slug":"medassist-anesthesia","splash":{"backgroundColor":"#ffffff","image":"./assets/icon.png","resizeMode":"contain"},"userInterfaceStyle":"light","version":"1.0.0","web":{"bundler":"metro","favicon":"./assets/icon.png"}}}
+{
+  "expo": {
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0E7C7B",
+        "foregroundImage": "./assets/icon.png"
+      },
+      "package": "com.medassist.anesthesia"
+    },
+    "icon": "./assets/icon.png",
+    "ios": {
+      "bundleIdentifier": "com.medassist.anesthesia",
+      "supportsTablet": true
+    },
+    "name": "MedAssist — مساعد التخدير الذكي",
+    "orientation": "portrait",
+    "plugins": [
+      "expo-router",
+      "expo-status-bar",
+      "expo-secure-store",
+      "expo-font"
+    ],
+    "scheme": "medassist",
+    "slug": "medassist-anesthesia",
+    "splash": {
+      "backgroundColor": "#ffffff",
+      "image": "./assets/icon.png",
+      "resizeMode": "contain"
+    },
+    "userInterfaceStyle": "light",
+    "version": "1.0.0",
+    "web": {
+      "bundler": "metro",
+      "favicon": "./assets/icon.png"
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "1abdb875-dea3-4b86-a834-09a6fb9674b6"
+      }
+    },
+    "owner": "rabt-platform"
+  }
+}

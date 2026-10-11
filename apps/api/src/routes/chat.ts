@@ -80,6 +80,12 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       try {
         result = await runChat(request.user!.sub, body.message, body.conversationId, {
           onPhase: (phase) => send('status', { phase }),
+          // Retry-safety: emit the conversation id in an EARLY status event,
+          // long before `meta`. If the stream drops, the client already knows
+          // which conversation to retry into instead of re-sending with
+          // conversationId=null (which spawned a duplicate conversation per
+          // retry). The phase is repeated as 'preparing' — idempotent for UI.
+          onConversation: (cid) => send('status', { phase: 'preparing', conversationId: cid }),
         });
       } catch (err) {
         // Headers are already sent — surface the failure as an SSE event so

@@ -89,4 +89,25 @@ describe('disclaimer + verdict persistence (M5)', () => {
       await app.close();
     }
   });
+
+  it('calls onConversation exactly once with the created conversation id', async () => {
+    const user = await makeUser('m5d@example.com');
+    const seen: string[] = [];
+    const result = await runChat(user.id, BENIGN, undefined, {
+      llm: mock,
+      onConversation: (cid) => {
+        seen.push(cid);
+      },
+    });
+    expect(seen).toEqual([result.conversationId]);
+    // Existing conversation: the same id is reported, no duplicate created.
+    const seen2: string[] = [];
+    await runChat(user.id, BENIGN, result.conversationId, {
+      llm: mock,
+      onConversation: (cid) => {
+        seen2.push(cid);
+      },
+    });
+    expect(seen2).toEqual([result.conversationId]);
+  });
 });

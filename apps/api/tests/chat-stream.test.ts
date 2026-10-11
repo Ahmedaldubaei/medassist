@@ -113,4 +113,52 @@ describe('POST /api/v1/chat/stream (SSE)', () => {
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it('emits the conversationId in an EARLY status event (retry-safety)', async () => {
+    // Retry-into-null bug: the client only learned the conversationId from
+    // the final `meta` event. A dropped stream left it with null, so every
+    // retry spawned a duplicate conversation. The server must now emit the id
+    // in a status event right after the conversation is known — before any
+    // token/meta event.
+    const { runChat } = await import('../src/agents/pipeline.js');
+    const earlyId = 'cl000000000000000000000099';
+    vi.mocked(runChat).mockImplementationOnce(async (_u, _m, _c, opts) => {
+      opts?.onPhase?.('preparing');
+      opts?.onConversation?.(earlyId);
+      return {
+        answer: 'رد.',
+        citations: [],
+        confidence: 0.5,
+        disclaimer: 'تعليمي فقط',
+        agentUsed: 'knowledge',
+        safetyVerdict: 'PASS',
+        conversationId: earlyId,
+        escalated: false,
+        checks: [],
+      };
+    });
+    const t = await token();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/v1/chat/stream',
+      headers: { authorization: `Bearer ${t}` },
+      payload: { message: 'hello' },
+    });
+    expect(res.statusCode).toBe(200);
+    const events = res.payload.split('\n\n').filter(Boolean);
+    const statusEvents = events.filter((e: string) => /^event: status$/m.test(e));
+    expect(statusEvents.length).toBeGreaterThan(0);
+    const withId = statusEvents.find((e: string) => {
+      try {
+        return (JSON.parse(e.match(/^data: (.*)$/m)![1]) as { conversationId?: string })
+          .conversationId === earlyId;
+      } catch {
+        return false;
+      }
+    });
+    expect(withId).toBeDefined();
+    // The early status event precedes the first token event.
+    const firstTokenIdx = events.findIndex((e: string) => /^event: token$/m.test(e));
+    expect(events.indexOf(withId!)).toBeLessThan(firstTokenIdx);
+  });
 });

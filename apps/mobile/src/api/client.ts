@@ -313,7 +313,7 @@ export const api = {
     body: { message: string; conversationId?: string },
     onToken: (text: string) => void,
     signal?: AbortSignal,
-    onStatus?: (phase: string) => void,
+    onStatus?: (status: { phase: string; conversationId?: string }) => void,
     // P3: resume hint — sent as `Last-Event-ID` when reconnecting. The server
     // currently ignores it (full resume-from-ID is future work); `retry:`
     // from the server still improves auto-reconnect behavior.
@@ -365,8 +365,12 @@ export const api = {
           onToken((JSON.parse(data) as { text: string }).text);
         } else if (event === 'status') {
           // M4: pipeline phase — drive the typing indicator, never the answer.
+          // Retry-safety: an early status event may carry the conversationId
+          // (emitted right after the server resolves/creates the conversation,
+          // long before `meta`). Callers capture it so a dropped stream can
+          // retry into the SAME conversation instead of spawning a duplicate.
           try {
-            onStatus?.((JSON.parse(data) as { phase: string }).phase);
+            onStatus?.(JSON.parse(data) as { phase: string; conversationId?: string });
           } catch {
             /* malformed status event: ignore */
           }

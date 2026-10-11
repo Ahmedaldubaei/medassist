@@ -254,18 +254,45 @@ export default function ChatScreen() {
 
   /**
    * New-chat case: we don't know the server's conversation id after a stream
-   * failure, so look for a reply to `text` in recently created conversations.
-   * Returns the conversation id when a reply was found (and displayed).
+   * failure, so look for the conversation the failed send created.
+   * Two passes over recently created conversations (newest first):
+   *  1. reply-match (existing behavior): a USER message with our text that
+   *     already has an assistant reply after it → display it, return its id.
+   *  2. orphan-match (retry-into-null bug fix): our text is the LAST user
+   *     message with no reply yet — the failed send persisted it but the
+   *     stream dropped before any reply. Return its id so the retry continues
+   *     the SAME conversation instead of spawning a duplicate per retry.
+   * Returns the conversation id when found, else null.
    */
-  const findReplyInRecentConversations = useCallback(
+  const resolveConversationForText = useCallback(
     async (text: string): Promise<string | null> => {
       if (!token) return null;
       try {
         const { data } = await listConversationsCached(token, scope);
-        const cutoff = Date.now() - 3 * 60 * 1000;
-        for (const c of data.conversations) {
-          if (Date.parse(c.createdAt) < cutoff) continue;
+        const cutoff = Date.now() - 5 * 60 * 1000;
+        const recent = data.conversations.filter((c) => Date.parse(c.createdAt) >= cutoff);
+        // Pass 1: reply-match.
+        for (const c of recent) {
           if (await serverHasReply(c.id, text)) return c.id;
+        }
+        // Pass 2: orphan-match — our text persisted as the last user message,
+        // no reply yet.
+        for (const c of recent) {
+          try {
+            const { data: md } = await getMessagesCached(token, scope, c.id);
+            const msgs = md.messages;
+            if (!msgs.length) continue;
+            const last = msgs[msgs.length - 1]!;
+            if (
+              last.role === 'USER' &&
+              last.content === text &&
+              Date.now() - Date.parse(last.createdAt) < 5 * 60 * 1000
+            ) {
+              return c.id;
+            }
+          } catch {
+            /* unreadable conversation: skip */
+          }
         }
         return null;
       } catch {
@@ -276,8 +303,12 @@ export default function ChatScreen() {
   );
 
   const doSend = useCallback(
-    async (text: string) => {
+    async (text: string, cidOverride?: string) => {
       if (!token) return;
+      // Retry-safety: prefer an explicitly resolved conversation id (e.g. one
+      // recovered after a failure) over state, which may still be null for a
+      // new chat whose first send failed before `meta` arrived.
+      const cid = cidOverride ?? conversationId;
       setError('');
       const userMsg: ChatMessage = { id: nextId(), role: 'user', text, createdAt: Date.now() };
       const assistantId = nextId();
@@ -295,7 +326,7 @@ export default function ChatScreen() {
         let streamed = '';
         const meta = await api.chatStream(
           token,
-          { message: text, conversationId },
+          { message: text, conversationId: cid ?? undefined },
           (tok) => {
             streamed += tok;
             const snapshot = streamed;
@@ -307,7 +338,13 @@ export default function ChatScreen() {
           // Hung connections must not disable the input forever (audit 2.3).
           AbortSignal.timeout(120_000),
           // M4: pipeline phase → live typing-indicator label.
-          (phase) => setStatusPhase(phase),
+          // Retry-safety: capture the early conversationId (emitted in the
+          // first status event, long before `meta`) so a dropped stream can
+          // retry into the SAME conversation instead of spawning a duplicate.
+          (status) => {
+            if (status.conversationId) setConversationId(status.conversationId);
+            setStatusPhase(status.phase);
+          },
         );
         setConversationId(meta.conversationId);
         // Reload to sync backend ids (needed for pin) and persisted citations.
@@ -317,12 +354,13 @@ export default function ChatScreen() {
         // The server pipeline may have completed despite the stream failing.
         // Check for an existing reply FIRST — never re-send blindly.
         let recovered = false;
-        if (conversationId) {
-          recovered = await serverHasReply(conversationId, text);
+        const lookupCid = cidOverride ?? conversationId;
+        if (lookupCid) {
+          recovered = await serverHasReply(lookupCid, text);
         } else {
-          const cid = await findReplyInRecentConversations(text);
-          if (cid) {
-            setConversationId(cid);
+          const foundCid = await resolveConversationForText(text);
+          if (foundCid) {
+            setConversationId(foundCid);
             recovered = true;
           }
         }
@@ -342,7 +380,7 @@ export default function ChatScreen() {
         setStatusPhase(null);
       }
     },
-    [token, conversationId, lang, reloadMessages, serverHasReply, findReplyInRecentConversations],
+    [token, conversationId, lang, reloadMessages, serverHasReply, resolveConversationForText],
   );
 
   const send = useCallback(async () => {
@@ -352,45 +390,85 @@ export default function ChatScreen() {
     await doSend(text);
   }, [input, sending, token, doSend]);
 
+  /** Regenerate core (no sending guard) — reused by the edit flow and retry. */
+  const runRegenerate = useCallback(
+    async (cidOverride?: string) => {
+      const cid = cidOverride ?? conversationId;
+      if (!token || !cid) return;
+      setError('');
+      setSending(true);
+      try {
+        const res = await api.conversations.regenerate(token, cid);
+        setConversationId(res.conversationId);
+        await reloadMessages(res.conversationId);
+      } catch {
+        setError(t(lang, 'chat.error'));
+      } finally {
+        setSending(false);
+      }
+    },
+    [token, conversationId, lang, reloadMessages],
+  );
+
   const retrySend = useCallback(
     async (msg: ChatMessage) => {
       if (sending || !token) return;
       setError('');
-      // The original send may have completed server-side after all; check
-      // before resending so a retry can never create a duplicate.
-      let recovered = false;
-      if (conversationId) {
-        recovered = await serverHasReply(conversationId, msg.text);
+      // Step 1: resolve the conversation the failed send belongs to.
+      // The server may have created it (and persisted our message) even
+      // though the stream dropped before `meta` arrived. Retrying with
+      // conversationId=null is what spawned a duplicate conversation per
+      // retry — never do that when we can resolve the real id.
+      let cid: string | undefined = conversationId;
+      if (!cid) {
+        cid = (await resolveConversationForText(msg.text)) ?? undefined;
+        if (cid) setConversationId(cid);
       } else {
-        const cid = await findReplyInRecentConversations(msg.text);
-        if (cid) {
-          setConversationId(cid);
-          recovered = true;
+        // A reply may have landed despite the stream failure.
+        if (await serverHasReply(cid, msg.text)) return;
+      }
+      if (cid) {
+        // Step 2: if our text is already persisted as the last user message
+        // (orphan — no reply yet), regenerate instead of re-sending, so the
+        // server never stores a duplicate user message.
+        try {
+          const { data } = await getMessagesCached(token, scope, cid);
+          const msgs = data.messages;
+          if (msgs.length > 0) {
+            const last = msgs[msgs.length - 1]!;
+            if (last.role === 'USER' && last.content === msg.text) {
+              setMessages(msgs.map((x) => toChatMessage(x, cid!)));
+              setOffline(false);
+              setOfflineAt(null);
+              await runRegenerate(cid);
+              return;
+            }
+          }
+        } catch {
+          /* fall through to a normal resend into cid */
         }
+        // Our message is NOT on the server: drop the local failed bubble and
+        // send into the resolved conversation (no new conversation created).
+        setMessages((prev) => prev.filter((m) => m.id !== msg.id));
+        await doSend(msg.text, cid ?? undefined);
+        return;
       }
+      // Genuinely nothing persisted server-side: fresh send (creates exactly
+      // one conversation, as before).
       setMessages((prev) => prev.filter((m) => m.id !== msg.id));
-      if (!recovered) {
-        await doSend(msg.text);
-      }
+      await doSend(msg.text);
     },
-    [sending, token, conversationId, serverHasReply, findReplyInRecentConversations, doSend],
+    [
+      sending,
+      token,
+      scope,
+      conversationId,
+      serverHasReply,
+      resolveConversationForText,
+      runRegenerate,
+      doSend,
+    ],
   );
-
-  /** Regenerate core (no sending guard) — reused by the edit flow. */
-  const runRegenerate = useCallback(async () => {
-    if (!token || !conversationId) return;
-    setError('');
-    setSending(true);
-    try {
-      const res = await api.conversations.regenerate(token, conversationId);
-      setConversationId(res.conversationId);
-      await reloadMessages(res.conversationId);
-    } catch {
-      setError(t(lang, 'chat.error'));
-    } finally {
-      setSending(false);
-    }
-  }, [token, conversationId, lang, reloadMessages]);
 
   const regenerate = useCallback(() => {
     if (sending) return;

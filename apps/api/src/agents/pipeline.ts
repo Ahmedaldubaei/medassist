@@ -49,6 +49,14 @@ export interface ChatOptions {
    * failing listener can never break the safety path.
    */
   onPhase?: (phase: ChatPhase) => void;
+  /**
+   * Called exactly once, right after the conversation is resolved (existing)
+   * or created (new chat). Lets the SSE route emit the conversationId in an
+   * EARLY status event — the client needs it before `meta` arrives, because
+   * a dropped stream must be retryable into the SAME conversation instead of
+   * spawning a duplicate (retry-into-null bug). Fire-and-forget like onPhase.
+   */
+  onConversation?: (conversationId: string) => void;
 }
 
 export interface ChatResult {
@@ -109,6 +117,14 @@ export async function runChat(
       // call). P3: cut at a word boundary instead of mid-word.
       data: { userId, title: conversationTitle(message) || 'محادثة جديدة' },
     });
+  }
+  // Retry-safety: the conversation id is known NOW (not at the end of the
+  // pipeline). Report it immediately so the SSE route can emit it in an
+  // early status event — see onConversation docs above.
+  try {
+    opts.onConversation?.(conv.id);
+  } catch {
+    /* listener errors are swallowed by design */
   }
   // The message being answered (persisted above, or the pre-existing last
   // user message in regenerate mode). Excluded from history — it is passed

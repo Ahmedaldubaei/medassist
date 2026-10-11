@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  CLINICIAN
+  STUDENT
+  VIEWER
+  USER
+}
+
+enum PreferredLang {
+  AR
+  EN
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+enum SafetyVerdict {
+  PASS
+  FLAG
+  BLOCK
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  name          String
+  passwordHash  String
+  role          Role           @default(STUDENT)
+  preferredLang PreferredLang  @default(AR)
+  createdAt     DateTime       @default(now())
+  conversations Conversation[]
+  auditLogs     AuditLog[]
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String    @default("New conversation")
+  createdAt DateTime  @default(now())
+  messages  Message[]
+  agentRuns AgentRun[]
+
+  @@index([userId])
+}
+
+model Message {
+  id            String      @id @default(cuid())
+  conversationId String
+  conversation  Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role          MessageRole
+  content       String
+  agentUsed     String?
+  citationsJson Json?
+  confidence    Float?
+  createdAt     DateTime    @default(now())
+  safetyReview  SafetyReview?
+
+  @@index([conversationId])
+}
+
+model KnowledgeDocument {
+  id            String           @id @default(cuid())
+  title         String
+  source        String
+  guidelineYear Int?
+  url           String?
+  license       String
+  specialty     String           @default("ANESTHESIOLOGY")
+  createdAt     DateTime         @default(now())
+  chunks        KnowledgeChunk[]
+
+  @@index([specialty])
+}
+
+model KnowledgeChunk {
+  id         String            @id @default(cuid())
+  documentId String
+  document   KnowledgeDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  section    String?
+  textAr     String?
+  textEn     String?
+  embedding  Unsupported("vector(384)")?
+  createdAt  DateTime          @default(now())
+
+  @@index([documentId])
+}
+
+model AgentRun {
+  id             String       @id @default(cuid())
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  routerDecision String?
+  agentsInvolved String[]
+  latencyMs      Int?
+  createdAt      DateTime     @default(now())
+}
+
+model SafetyReview {
+  id         String        @id @default(cuid())
+  messageId  String        @unique
+  message    Message       @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  checksJson Json
+  verdict    SafetyVerdict
+  escalated  Boolean       @default(false)
+  createdAt  DateTime      @default(now())
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action      String
+  detailsJson Json?
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+}

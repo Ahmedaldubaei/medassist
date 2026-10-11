@@ -1,0 +1,42 @@
+{
+  "dependencies": {
+    "@expo-google-fonts/ibm-plex-sans-arabic": "^0.4.2",
+    "@expo/vector-icons": "^15.0.2",
+    "expo": "~57.0.27",
+    "expo-constants": "~57.0.21",
+    "expo-font": "~57.0.4",
+    "expo-linking": "~57.0.12",
+    "expo-router": "~57.0.25",
+    "expo-secure-store": "~57.0.4",
+    "expo-status-bar": "~57.0.1",
+    "expo-updates": "~57.0.25",
+    "react": "19.2.3",
+    "react-dom": "^19.2.3",
+    "react-native": "0.86.3",
+    "react-native-markdown-display": "^7.0.2",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0",
+    "react-native-web": "^0.21.4"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "eslint": "^9.0.0",
+    "eslint-config-expo": "~57.0.2",
+    "typescript": "~6.0.3",
+    "vite": "^5.4.21",
+    "vitest": "^2.1.9"
+  },
+  "main": "expo-router/entry",
+  "name": "medassist-mobile",
+  "private": true,
+  "scripts": {
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "start": "expo start",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "web": "expo start --web",
+    "lint": "expo lint"
+  },
+  "version": "1.0.0"
+}

@@ -1,0 +1,36 @@
+# Koyeb service definition for the MedAssist API.
+#
+# Deploy options:
+#   1. Koyeb dashboard → Create service → Git → this repository,
+#      builder: Dockerfile, Dockerfile path: apps/api/Dockerfile, port 3000.
+#   2. Koyeb CLI / koyeb/action-git-deploy pointing at this file.
+#
+# Secrets are configured in the Koyeb dashboard (never committed here):
+#   DATABASE_URL      — Neon Postgres 16 + pgvector (CREATE EXTENSION vector)
+#   JWT_SECRET        — 64-byte hex for API auth
+#   GEMINI_API_KEY    — dedicated MedAssist key (primary LLM)
+#   CEREBRAS_API_KEY  — dedicated MedAssist key (fallback LLM)
+#
+# Free-tier notes: Nano instance, no credit card, no sleep.
+
+name: medassist-api
+
+services:
+  - name: api
+    type: web
+    # git:
+    #   repository: github.com/<org>/medassist
+    #   branch: main
+    dockerfile: apps/api/Dockerfile
+    ports:
+      - port: 3000
+        protocol: http
+    env:
+      - name: NODE_ENV
+        value: "production"
+      - name: PORT
+        value: "3000"
+    healthcheck:
+      http:
+        port: 3000
+        path: /health

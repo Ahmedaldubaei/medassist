@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Environment & secrets — NEVER commit real keys
+.env
+.env.local
+
+# Build output
+dist/
+
+# Eval artifacts (large JSON result files)
+eval-results/
+
+# Logs
+*.log
+
+# Expo
+.expo/
+
+# HuggingFace / transformers.js model cache (large binaries, re-downloaded at runtime)
+.hf-cache/
+
+# Misc
+.DS_Store
+coverage/

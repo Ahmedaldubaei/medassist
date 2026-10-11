@@ -2,13 +2,25 @@
  * "Continue with Google" button.
  * Uses expo-auth-session's Google ID-token flow: on success the ID token is
  * POSTed to /api/v1/auth/google, and the returned JWT is stored exactly like
- * the email login flow. On web the redirect is the current origin (registered
- * in the Google OAuth client); on native it uses the app scheme — platform
- * OAuth clients (androidClientId/iosClientId) can be supplied later via env.
+ * the email login flow.
+ *
+ * Web quirk (this bit us): on web the auth response arrives via page redirect,
+ * NOT via the awaited promptAsync() promise — so we must call
+ * WebBrowser.maybeCompleteAuthSession() and react to the hook's `response`
+ * state. The web redirect URI is pinned to window.location.origin, which
+ * matches the Authorized redirect URI registered in the Google OAuth client.
  */
-import React, { useState } from 'react';
-import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  Platform,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
+} from 'react-native';
 import { router } from 'expo-router';
+import * as WebBrowser from 'expo-web-browser';
 import * as Google from 'expo-auth-session/providers/google';
 import { MaterialIcons } from '@expo/vector-icons';
 import { api } from '../api/client';
@@ -17,46 +29,69 @@ import { t } from '../i18n';
 import { colors, fontFamily, fontSize, radius, spacing } from '../theme';
 import { ErrorBanner } from './ui';
 
+WebBrowser.maybeCompleteAuthSession();
+
 const GOOGLE_CLIENT_ID =
   process.env.EXPO_PUBLIC_GOOGLE_CLIENT_ID ??
   '1087373322481-d78c5rso191hd4hlcis95v7cuqgnd194.apps.googleusercontent.com';
+
+// On web the redirect must exactly match the URI registered in Google Cloud.
+const REDIRECT_URI =
+  Platform.OS === 'web' && typeof window !== 'undefined'
+    ? window.location.origin
+    : undefined;
 
 export function GoogleSignInButton() {
   const { signIn, lang } = useAuth();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [request, , promptAsync] = Google.useIdTokenAuthRequest(
-    {
-      clientId: GOOGLE_CLIENT_ID,
-      androidClientId: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
-      iosClientId: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID,
+  const [request, response, promptAsync] = Google.useIdTokenAuthRequest({
+    clientId: GOOGLE_CLIENT_ID,
+    redirectUri: REDIRECT_URI,
+    androidClientId: process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID,
+    iosClientId: process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID,
+  });
+
+  const completeSignIn = useCallback(
+    async (idToken: string) => {
+      try {
+        const { token, user } = await api.googleLogin({ idToken });
+        await signIn(token, user);
+        router.replace('/(app)');
+      } catch {
+        setError(t(lang, 'auth.errGoogle'));
+      } finally {
+        setBusy(false);
+      }
     },
-    { scheme: 'medassist' },
+    [lang, signIn],
   );
 
-  const onPress = async () => {
+  /* eslint-disable react-hooks/set-state-in-effect -- response-driven auth completion, not a render loop */
+  useEffect(() => {
+    if (!response) return;
+    if (response.type === 'success') {
+      const idToken = response.params.id_token as string | undefined;
+      if (idToken) {
+        void completeSignIn(idToken);
+      } else {
+        setError(t(lang, 'auth.errGoogle'));
+        setBusy(false);
+      }
+    } else {
+      // dismissed or error — let the user try again
+      setBusy(false);
+      if (response.type === 'error') setError(t(lang, 'auth.errGoogle'));
+    }
+  }, [response, completeSignIn, lang]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const onPress = () => {
     if (!request || busy) return;
     setError('');
     setBusy(true);
-    try {
-      const res = await promptAsync();
-      if (res.type !== 'success') {
-        setError(t(lang, 'auth.errGoogle'));
-        return;
-      }
-      const idToken = res.params.id_token as string | undefined;
-      if (!idToken) {
-        setError(t(lang, 'auth.errGoogle'));
-        return;
-      }
-      const { token, user } = await api.googleLogin({ idToken });
-      await signIn(token, user);
-      router.replace('/(app)');
-    } catch {
-      setError(t(lang, 'auth.errGoogle'));
-    } finally {
-      setBusy(false);
-    }
+    // Do NOT await on web — the result arrives via `response` after redirect.
+    void promptAsync();
   };
 
   return (

@@ -35,6 +35,12 @@ export interface ChatOptions {
   examMode?: boolean;
   /** Optional per-phase latency collector (eval harness). */
   timings?: PhaseTimings;
+  /**
+   * Regenerate mode: the conversation already exists and its last user
+   * message is already persisted — do NOT create a duplicate USER message.
+   * The caller must pass an existing conversationId.
+   */
+  regenerate?: boolean;
 }
 
 export interface ChatResult {
@@ -66,14 +72,19 @@ export async function runChat(
     ? await prisma.conversation.findFirst({ where: { id: conversationId, userId } })
     : null;
   if (!conv) {
+    if (opts.regenerate) {
+      throw new Error('regenerate requires an existing conversation');
+    }
     conv = await prisma.conversation.create({
       // Deterministic title from the first user message (~40 chars, no LLM call).
       data: { userId, title: message.trim().slice(0, 40) || 'محادثة جديدة' },
     });
   }
-  await prisma.message.create({
-    data: { conversationId: conv.id, role: 'USER', content: message },
-  });
+  if (!opts.regenerate) {
+    await prisma.message.create({
+      data: { conversationId: conv.id, role: 'USER', content: message },
+    });
+  }
 
   // 1) PRE-CHECK — deterministic, before any agent or LLM work.
   // In eval exam mode the emergency escalation is skipped (published exam

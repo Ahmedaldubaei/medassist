@@ -9,6 +9,7 @@ import { authRoutes } from './routes/auth.js';
 import { ragRoutes } from './routes/rag.js';
 import { chatRoutes } from './routes/chat.js';
 import { conversationRoutes } from './routes/conversations.js';
+import { clinicalRoutes } from './routes/clinical.js';
 
 export function buildApp() {
   const app = Fastify({ logger: config.NODE_ENV !== 'test' });
@@ -21,6 +22,7 @@ export function buildApp() {
   app.register(ragRoutes);
   app.register(chatRoutes);
   app.register(conversationRoutes);
+  app.register(clinicalRoutes);
 
   return app;
 }

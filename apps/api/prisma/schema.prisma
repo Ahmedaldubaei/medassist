@@ -70,7 +70,8 @@ model Message {
   agentUsed     String?
   citationsJson Json?
   confidence    Float?
-  createdAt     DateTime    @default(now())
+  pinned        Boolean       @default(false)
+  createdAt     DateTime      @default(now())
   safetyReview  SafetyReview?
 
   @@index([conversationId])
@@ -133,4 +134,29 @@ model AuditLog {
 
   @@index([userId])
   @@index([action])
+}
+
+/**
+ * Curated clinical content seeded ONLY from the ingested corpus.
+ * Every step/entry must carry its source citation; the seed script
+ * refuses entries without one. If the corpus lacks a fact, the UI
+ * shows "غير متوفر في المراجع الحالية" instead of inventing it.
+ */
+model ClinicalChecklist {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  titleAr   String
+  titleEn   String
+  category  String   @default("emergency")
+  stepsJson Json
+  updatedAt DateTime @updatedAt
+}
+
+model DrugReference {
+  id          String   @id @default(cuid())
+  nameAr      String
+  nameEn      String   @unique
+  classAr     String?
+  entriesJson Json
+  updatedAt   DateTime @updatedAt
 }

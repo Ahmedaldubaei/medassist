@@ -4,6 +4,7 @@
  */
 import { Platform } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const BASE_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000';
 const TOKEN_KEY = 'medassist_token';
@@ -47,6 +48,9 @@ export interface ChatMessage {
   text: string;
   createdAt: number;
   chat?: ChatResponse;
+  /** Backend message id (present for persisted messages) — needed for pin. */
+  backendId?: string;
+  pinned?: boolean;
 }
 
 export class ApiError extends Error {
@@ -121,6 +125,7 @@ export interface ConversationMessageItem {
   agentUsed: string | null;
   citations: Citation[];
   confidence: number | null;
+  pinned: boolean;
   createdAt: string;
 }
 
@@ -138,6 +143,69 @@ export interface ChatStreamMeta {
   safetyVerdict: 'PASS' | 'FLAG' | 'BLOCK';
   conversationId: string;
   escalated: boolean;
+}
+
+export interface ClinicalCitation {
+  title: string;
+  source: string;
+}
+
+export interface ChecklistStep {
+  textAr: string;
+  textEn: string;
+  citation: ClinicalCitation;
+  unavailable?: boolean;
+}
+
+export interface ChecklistSummary {
+  key: string;
+  titleAr: string;
+  titleEn: string;
+  category: string;
+  updatedAt: string;
+}
+
+export interface ChecklistDetail extends ChecklistSummary {
+  steps: ChecklistStep[];
+}
+
+export interface DrugEntry {
+  indicationAr: string;
+  indicationEn: string;
+  dose: string | null;
+  route: string | null;
+  notesAr: string | null;
+  notesEn: string | null;
+  perKg: { min: number; max: number; unit: string } | null;
+  citation: ClinicalCitation;
+}
+
+export interface DrugItem {
+  nameAr: string;
+  nameEn: string;
+  classAr: string | null;
+  entries: DrugEntry[];
+  updatedAt: string;
+}
+
+export interface MessageSearchHit {
+  id: string;
+  role: string;
+  preview: string;
+  pinned: boolean;
+  createdAt: string;
+  conversationId: string;
+  conversationTitle: string;
+}
+
+export interface PinnedMessage {
+  id: string;
+  role: string;
+  preview: string;
+  content: string;
+  createdAt: string;
+  conversationId: string;
+  conversationTitle: string;
 }
 
 /* ---------------------------------- client -------------------------------- */
@@ -179,6 +247,12 @@ export const api = {
     }),
 
   me: (token: string) => request<{ user: PublicUser }>('/api/v1/auth/me', {}, token),
+
+  updateMe: (token: string, body: { name?: string; preferredLang?: 'ar' | 'en' }) =>
+    request<{ user: PublicUser }>('/api/v1/auth/me', { method: 'PATCH', body: JSON.stringify(body) }, token),
+
+  deleteMe: (token: string) =>
+    request<{ ok: boolean }>('/api/v1/auth/me', { method: 'DELETE' }, token),
 
   chat: (token: string, body: { message: string; conversationId?: string }) =>
     request<ChatResponse>('/api/v1/chat', { method: 'POST', body: JSON.stringify(body) }, token),
@@ -263,9 +337,106 @@ export const api = {
         { method: 'DELETE' },
         token,
       ),
+    search: (token: string, q: string) =>
+      request<{ messages: MessageSearchHit[] }>(
+        `/api/v1/conversations/search?q=${encodeURIComponent(q)}`,
+        {},
+        token,
+      ),
+    pinned: (token: string) =>
+      request<{ messages: PinnedMessage[] }>('/api/v1/conversations/pinned', {}, token),
+    regenerate: (token: string, id: string) =>
+      request<ChatResponse>(
+        `/api/v1/conversations/${encodeURIComponent(id)}/regenerate`,
+        { method: 'POST' },
+        token,
+      ),
+  },
+
+  messages: {
+    pin: (token: string, id: string, pinned: boolean) =>
+      request<{ ok: boolean; pinned: boolean }>(
+        `/api/v1/messages/${encodeURIComponent(id)}/pin`,
+        { method: 'PATCH', body: JSON.stringify({ pinned }) },
+        token,
+      ),
+  },
+
+  clinical: {
+    checklists: (token: string) =>
+      request<{ checklists: ChecklistSummary[] }>('/api/v1/clinical/checklists', {}, token),
+    checklist: (token: string, key: string) =>
+      request<ChecklistDetail>(
+        `/api/v1/clinical/checklists/${encodeURIComponent(key)}`,
+        {},
+        token,
+      ),
+    drugs: (token: string, q?: string) =>
+      request<{ drugs: DrugItem[] }>(
+        `/api/v1/clinical/drugs${q ? `?q=${encodeURIComponent(q)}` : ''}`,
+        {},
+        token,
+      ),
   },
 
   health: () => request<{ status: string; db: string }>('/health'),
 };
 
 export { BASE_URL };
+
+/* --------------------------- offline read-through cache --------------------------- */
+/**
+ * Tight-scope offline cache: after a successful load of the conversations list
+ * or a conversation's messages, the payload is persisted (per user). When the
+ * network request fails, the cached copy is served with `fromCache: true` so
+ * the UI can show the "offline" banner. No background sync.
+ */
+const CACHE_PREFIX = 'medassist_cache_v1';
+
+async function cacheSet(scope: string, key: string, value: unknown): Promise<void> {
+  try {
+    await AsyncStorage.setItem(`${CACHE_PREFIX}:${scope}:${key}`, JSON.stringify(value));
+  } catch {
+    /* cache is best-effort */
+  }
+}
+
+async function cacheGet<T>(scope: string, key: string): Promise<T | null> {
+  try {
+    const raw = await AsyncStorage.getItem(`${CACHE_PREFIX}:${scope}:${key}`);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function listConversationsCached(
+  token: string,
+  scope: string,
+): Promise<{ data: ConversationListResponse; fromCache: boolean }> {
+  try {
+    const data = await api.conversations.list(token, { limit: 50 });
+    await cacheSet(scope, 'conversations', data);
+    return { data, fromCache: false };
+  } catch (err) {
+    const cached = await cacheGet<ConversationListResponse>(scope, 'conversations');
+    if (cached) return { data: cached, fromCache: true };
+    throw err;
+  }
+}
+
+export async function getMessagesCached(
+  token: string,
+  scope: string,
+  conversationId: string,
+): Promise<{ data: ConversationMessagesResponse; fromCache: boolean }> {
+  try {
+    const data = await api.conversations.messages(token, conversationId, { limit: 100 });
+    await cacheSet(scope, `messages:${conversationId}`, data);
+    return { data, fromCache: false };
+  } catch (err) {
+    const cached = await cacheGet<ConversationMessagesResponse>(scope, `messages:${conversationId}`);
+    if (cached) return { data: cached, fromCache: true };
+    throw err;
+  }
+}

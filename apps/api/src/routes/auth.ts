@@ -233,4 +233,58 @@ const googleSchema = z.object({
       return reply.send({ ok: true });
     },
   );
+
+  // Update own profile (name / preferred language).
+  app.patch(
+    '/api/v1/auth/me',
+    {
+      preHandler: [app.authenticate],
+      config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    },
+    async (request, reply) => {
+      const body = z
+        .object({
+          name: z.string().trim().min(1).max(100).optional(),
+          preferredLang: z.enum(['ar', 'en']).optional(),
+        })
+        .refine((b) => b.name !== undefined || b.preferredLang !== undefined, {
+          message: 'Nothing to update',
+        })
+        .parse(request.body);
+      const userId = request.user!.sub;
+
+      const user = await prisma.user.update({
+        where: { id: userId },
+        data: {
+          ...(body.name !== undefined ? { name: body.name } : {}),
+          ...(body.preferredLang !== undefined
+            ? { preferredLang: body.preferredLang === 'ar' ? 'AR' : 'EN' }
+            : {}),
+        },
+      });
+      await prisma.auditLog.create({ data: { userId, action: 'auth.profile.updated' } });
+      return reply.send({ user: publicUser(user) });
+    },
+  );
+
+  // Delete own account. Audit entry is written BEFORE the delete; the user's
+  // audit rows survive via onDelete: SetNull while conversations cascade.
+  // No password required (Google users have none) — the mobile UI double-confirms.
+  app.delete(
+    '/api/v1/auth/me',
+    {
+      preHandler: [app.authenticate],
+      config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+    },
+    async (request, reply) => {
+      const userId = request.user!.sub;
+      const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true } });
+      if (!user) {
+        return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'User not found' } });
+      }
+      await prisma.auditLog.create({ data: { userId, action: 'auth.account.deleted' } });
+      await prisma.user.delete({ where: { id: userId } });
+      return reply.send({ ok: true });
+    },
+  );
 }

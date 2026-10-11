@@ -1,13 +1,29 @@
 /**
- * Conversations list — the signed-in user's own chat history from the backend
- * (GET /api/v1/conversations, newest first), with pull-to-refresh and a
- * "new chat" entry point. Per-account scoping is enforced server-side.
+ * Home — conversations list with:
+ * - Personalized greeting ("مرحبًا د. {name}")
+ * - In-chat search bar (searches the user's own messages server-side)
+ * - Quick links: emergency checklists, drugs, calculators, pinned
+ * - Offline read-through cache with banner
  */
 import React, { useCallback, useState } from 'react';
-import { Alert, FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { Link, router, useFocusEffect } from 'expo-router';
+import {
+  Alert,
+  FlatList,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+} from 'react-native';
+import { router, useFocusEffect } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
-import { api, type ConversationListItem } from '../../api/client';
+import {
+  api,
+  listConversationsCached,
+  type ConversationListItem,
+  type MessageSearchHit,
+} from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { t } from '../../i18n';
 import { colors, fontFamily, fontSize, radius, spacing } from '../../theme';
@@ -52,33 +68,57 @@ function Row({
   );
 }
 
-export default function ConversationsScreen() {
-  const { token, lang } = useAuth();
+function QuickLink({
+  icon,
+  label,
+  href,
+  danger,
+}: {
+  icon: string;
+  label: string;
+  href: string;
+  danger?: boolean;
+}) {
+  return (
+    <TouchableOpacity
+      style={[styles.quick, danger && styles.quickDanger]}
+      activeOpacity={0.8}
+      onPress={() => router.push(href as never)}
+    >
+      <MaterialIcons name={icon as never} size={22} color={danger ? '#fff' : colors.primary} />
+      <Text style={[styles.quickLabel, danger && styles.quickLabelDanger]}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
+export default function HomeScreen() {
+  const { token, user, lang } = useAuth();
   const [convs, setConvs] = useState<ConversationListItem[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [offline, setOffline] = useState(false);
+  const [q, setQ] = useState('');
+  const [hits, setHits] = useState<MessageSearchHit[] | null>(null);
+
+  const scope = user?.id ?? 'anon';
 
   const load = useCallback(async () => {
     if (!token) return;
     try {
       setLoadError('');
-      const res = await api.conversations.list(token, { limit: 50 });
-      setConvs(res.conversations);
+      const { data, fromCache } = await listConversationsCached(token, scope);
+      setConvs(data.conversations);
+      setOffline(fromCache);
     } catch {
       setLoadError(t(lang, 'chat.errLoad'));
     }
-  }, [token, lang]);
+  }, [token, scope, lang]);
 
   useFocusEffect(
     useCallback(() => {
-      let alive = true;
       setConvs(null);
-      void load().then(() => {
-        if (!alive) return;
-      });
-      return () => {
-        alive = false;
-      };
+      setOffline(false);
+      void load();
     }, [load]),
   );
 
@@ -101,32 +141,120 @@ export default function ConversationsScreen() {
     [token, lang],
   );
 
+  // Debounced in-chat search (user-scoped, server-side).
+  React.useEffect(() => {
+    if (!q.trim() || !token) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setHits(null);
+      return;
+    }
+    const h = setTimeout(async () => {
+      try {
+        const res = await api.conversations.search(token, q.trim());
+        setHits(res.messages);
+      } catch {
+        setHits([]);
+      }
+    }, 400);
+    return () => clearTimeout(h);
+  }, [q, token]);
+
+  const greeting = user?.name?.trim()
+    ? `${t(lang, 'home.greeting')} ${user.name.trim()}`
+    : t(lang, 'home.greetingFallback');
+
   if (convs === null && !loadError) return <LoadingView label={t(lang, 'common.loading')} />;
+
+  const showingSearch = q.trim().length > 0;
 
   return (
     <View style={styles.root}>
+      <View style={styles.greetingWrap}>
+        <Text style={[styles.greeting, { textAlign: lang === 'ar' ? 'right' : 'left' }]}>
+          {greeting}
+        </Text>
+      </View>
+
+      {offline ? (
+        <View style={styles.offlineBanner}>
+          <MaterialIcons name="cloud-off" size={16} color={colors.warning} />
+          <Text style={styles.offlineText}>{t(lang, 'common.offline')}</Text>
+        </View>
+      ) : null}
+
+      <View style={styles.searchWrap}>
+        <MaterialIcons name="search" size={20} color={colors.textMuted} />
+        <TextInput
+          style={[styles.search, { textAlign: lang === 'ar' ? 'right' : 'left' }]}
+          placeholder={t(lang, 'home.searchChats')}
+          placeholderTextColor={colors.textMuted}
+          value={q}
+          onChangeText={setQ}
+        />
+        {q ? (
+          <TouchableOpacity onPress={() => setQ('')} hitSlop={10}>
+            <MaterialIcons name="close" size={18} color={colors.textMuted} />
+          </TouchableOpacity>
+        ) : null}
+      </View>
+
+      <View style={styles.quickRow}>
+        <QuickLink icon="emergency" label={t(lang, 'home.emergency')} href="/(app)/emergency" danger />
+        <QuickLink icon="medication" label={t(lang, 'home.drugs')} href="/(app)/drugs" />
+        <QuickLink icon="calculate" label={t(lang, 'home.calculators')} href="/(app)/calculators" />
+        <QuickLink icon="push-pin" label={t(lang, 'home.pinned')} href="/(app)/pinned" />
+      </View>
+
       {loadError ? (
         <View style={styles.errorWrap}>
           <ErrorBanner message={loadError} />
         </View>
       ) : null}
-      <FlatList
-        data={convs ?? []}
-        keyExtractor={(c) => c.id}
-        renderItem={({ item }) => <Row conv={item} lang={lang} onDelete={onDelete} />}
-        contentContainerStyle={styles.list}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-        ListEmptyComponent={
-          <EmptyState icon="forum" title={t(lang, 'chat.empty')} hint={t(lang, 'chat.emptyHint')} />
-        }
-      />
+
+      {showingSearch ? (
+        <FlatList
+          data={hits ?? []}
+          keyExtractor={(m) => m.id}
+          contentContainerStyle={styles.list}
+          ListEmptyComponent={
+            hits === null ? null : (
+              <EmptyState icon="search" title={t(lang, 'search.empty')} />
+            )
+          }
+          renderItem={({ item }) => (
+            <TouchableOpacity
+              style={styles.row}
+              activeOpacity={0.7}
+              onPress={() => router.push(`/(app)/chat/${item.conversationId}`)}
+            >
+              <View style={styles.rowIcon}>
+                <MaterialIcons name="search" size={20} color={colors.primary} />
+              </View>
+              <View style={styles.rowBody}>
+                <Text style={styles.rowTitle} numberOfLines={2}>{item.preview}</Text>
+                <Text style={styles.rowDate} numberOfLines={1}>{item.conversationTitle}</Text>
+              </View>
+            </TouchableOpacity>
+          )}
+        />
+      ) : (
+        <FlatList
+          data={convs ?? []}
+          keyExtractor={(c) => c.id}
+          renderItem={({ item }) => <Row conv={item} lang={lang} onDelete={onDelete} />}
+          contentContainerStyle={styles.list}
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+          ListEmptyComponent={
+            <EmptyState icon="forum" title={t(lang, 'chat.empty')} hint={t(lang, 'chat.emptyHint')} />
+          }
+        />
+      )}
+
       <View style={styles.fabWrap}>
-        <Link href="/(app)/chat/new" asChild>
-          <TouchableOpacity style={styles.fab} activeOpacity={0.85}>
-            <MaterialIcons name="add" size={22} color="#fff" />
-            <Text style={styles.fabText}>{t(lang, 'chat.new')}</Text>
-          </TouchableOpacity>
-        </Link>
+        <TouchableOpacity style={styles.fab} activeOpacity={0.85} onPress={() => router.push('/(app)/chat/new' as never)}>
+          <MaterialIcons name="add" size={22} color="#fff" />
+          <Text style={styles.fabText}>{t(lang, 'chat.new')}</Text>
+        </TouchableOpacity>
       </View>
     </View>
   );
@@ -134,8 +262,30 @@ export default function ConversationsScreen() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.background },
+  greetingWrap: { paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: spacing.xs },
+  greeting: { fontFamily: fontFamily.bold, fontSize: fontSize.xl, color: colors.navy },
+  offlineBanner: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+    marginHorizontal: spacing.md, marginTop: spacing.xs, padding: spacing.sm,
+    backgroundColor: colors.warningSoft, borderRadius: radius.md,
+  },
+  offlineText: { fontFamily: fontFamily.medium, fontSize: fontSize.xs, color: colors.warning },
+  searchWrap: {
+    flexDirection: 'row', alignItems: 'center', gap: spacing.xs,
+    margin: spacing.md, marginBottom: spacing.sm, paddingHorizontal: spacing.md,
+    backgroundColor: colors.surface, borderRadius: radius.pill, height: 46,
+  },
+  search: { flex: 1, fontFamily: fontFamily.regular, fontSize: fontSize.sm, color: colors.text },
+  quickRow: { flexDirection: 'row', gap: spacing.xs, paddingHorizontal: spacing.md, marginBottom: spacing.xs },
+  quick: {
+    flex: 1, alignItems: 'center', gap: 4, paddingVertical: spacing.sm,
+    backgroundColor: colors.surface, borderRadius: radius.md,
+  },
+  quickDanger: { backgroundColor: colors.danger },
+  quickLabel: { fontFamily: fontFamily.medium, fontSize: fontSize.xs, color: colors.primary },
+  quickLabelDanger: { color: '#fff' },
   errorWrap: { paddingHorizontal: spacing.md, paddingTop: spacing.sm },
-  list: { padding: spacing.md, gap: spacing.sm, flexGrow: 1 },
+  list: { padding: spacing.md, paddingTop: spacing.sm, gap: spacing.sm, flexGrow: 1 },
   row: {
     flexDirection: 'row', alignItems: 'center', gap: spacing.sm,
     backgroundColor: colors.surface, borderRadius: radius.md, padding: spacing.md,

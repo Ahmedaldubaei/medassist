@@ -72,22 +72,31 @@ describe('POST /api/v1/chat/stream (SSE)', () => {
 
     const payload = res.payload;
     const events = payload.split('\n\n').filter(Boolean);
-    const types = events.map((e) => e.match(/^event: (\w+)/)?.[1]);
+    // P3: the stream starts with a `retry:` preamble and every event now
+    // carries an incrementing `id:` line — parse accordingly.
+    expect(events[0]).toBe('retry: 3000');
+    const types = events.map((e) => e.match(/^event: (\w+)/m)?.[1]).filter(Boolean);
     expect(types[0]).toBe('token');
     expect(types.filter((x) => x === 'token').length).toBeGreaterThan(1);
     expect(types[types.length - 2]).toBe('meta');
     expect(types[types.length - 1]).toBe('done');
 
+    // Event ids increment per stream.
+    const ids = events
+      .map((e) => e.match(/^id: (\d+)$/m)?.[1])
+      .filter(Boolean)
+      .map(Number);
+    expect(ids).toEqual(ids.map((_, i) => i + 1));
+
     // Token chunks concatenate back to the full answer exactly.
     const streamed = events
-      .filter((e) => e.startsWith('event: token'))
-      .map((e) => JSON.parse(e.split('\ndata: ')[1]).text)
+      .filter((e) => /^event: token$/m.test(e))
+      .map((e) => JSON.parse(e.match(/^data: (.*)$/m)![1]).text)
       .join('');
     expect(streamed).toContain('هذا رد تجريبي طويل');
 
-    const meta = JSON.parse(
-      events.find((e) => e.startsWith('event: meta'))!.split('\ndata: ')[1],
-    );
+    const metaChunk = events.find((e) => /^event: meta$/m.test(e))!;
+    const meta = JSON.parse(metaChunk.match(/^data: (.*)$/m)![1]);
     expect(meta.confidence).toBe(0.87);
     expect(meta.safetyVerdict).toBe('PASS');
     expect(meta.citations).toHaveLength(1);

@@ -4,7 +4,9 @@
  */
 import { getAgent } from './registry.js';
 import {
+  emitPhase,
   formatChunksForPrompt,
+  formatHistoryForPrompt,
   noEvidenceResponse,
   retrieveChunks,
   type AgentRunInput,
@@ -13,16 +15,18 @@ import {
 
 export async function runKnowledgeAgent(input: AgentRunInput): Promise<AgentRunOutput> {
   const def = getAgent('knowledge');
-  const chunks = await retrieveChunks(input.query, def, input.embedProvider, input.timings);
+  const chunks = await retrieveChunks(input.query, def, input.embedProvider, input.timings, input.onPhase);
   if (chunks.length === 0) {
     return { draft: noEvidenceResponse(input.lang, input.query), chunks, agentId: 'knowledge' };
   }
+  emitPhase(input, 'generating');
   const { text } = await input.llm.complete(
     [
       { role: 'system', content: def.systemPrompt(input.lang) },
       {
         role: 'user',
         content:
+          formatHistoryForPrompt(input.history, input.lang) +
           (input.lang === 'ar'
             ? `السؤال: ${input.query}\n\nالمصادر الموثقة:\n${formatChunksForPrompt(chunks)}\n\nأجب من المصادر أعلاه فقط، مع الاستشهاد [n].`
             : `Question: ${input.query}\n\nVerified sources:\n${formatChunksForPrompt(chunks)}\n\nAnswer from the sources above only, citing [n].`),

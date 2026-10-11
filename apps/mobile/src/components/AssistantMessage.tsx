@@ -14,7 +14,9 @@ import { parseMessageSections } from '../lib/parseMessage';
 import type { ChatResponse, Citation } from '../api/client';
 
 function ConfidenceBadge({ value, lang }: { value: number; lang: Lang }) {
-  const level = value >= 0.75 ? 'high' : value >= 0.5 ? 'medium' : 'low';
+  // Policy §10: the numeric confidence score is NOT calibrated — it must
+  // never be shown as a percentage. Qualitative levels only.
+  const level = value >= 0.7 ? 'high' : value >= 0.4 ? 'medium' : 'low';
   const key: I18nKey =
     level === 'high' ? 'msg.confidenceHigh' : level === 'medium' ? 'msg.confidenceMedium' : 'msg.confidenceLow';
   const bg = level === 'high' ? colors.successSoft : level === 'medium' ? colors.warningSoft : colors.dangerSoft;
@@ -23,7 +25,7 @@ function ConfidenceBadge({ value, lang }: { value: number; lang: Lang }) {
     <View style={[styles.badge, { backgroundColor: bg }]}>
       <MaterialIcons name="verified" size={14} color={fg} />
       <Text style={[styles.badgeText, { color: fg }]}>
-        {t(lang, 'msg.confidence')}: {t(lang, key)} · {Math.round(value * 100)}%
+        {t(lang, 'msg.confidence')}: {t(lang, key)}
       </Text>
     </View>
   );

@@ -6,9 +6,15 @@
 import { hybridSearch, type RetrievalResult } from '../rag/retrieve.js';
 import { rerank } from '../rag/rerank.js';
 import type { EmbedProvider } from '../rag/embeddings.js';
-import type { LlmProvider } from '../llm/index.js';
+import type { LlmMessage, LlmProvider } from '../llm/index.js';
 import type { AgentDefinition, AgentId } from './registry.js';
 import type { Lang } from './router.js';
+
+/** One prior conversation turn, oldest-first. Excludes the current query. */
+export interface HistoryTurn {
+  role: 'user' | 'assistant';
+  content: string;
+}
 
 export interface AgentRunInput {
   query: string;
@@ -17,6 +23,32 @@ export interface AgentRunInput {
   embedProvider?: EmbedProvider;
   /** Optional per-phase latency collector (eval harness). Absent = zero overhead. */
   timings?: PhaseTimings;
+  /**
+   * Prior conversation turns (oldest first), excluding the current query.
+   * Conversation-scoped by the pipeline — never spans conversations.
+   */
+  history?: HistoryTurn[];
+  /**
+   * Optional pipeline phase reporter (M4: live status during SSE).
+   * Fire-and-forget — implementations must never throw.
+   */
+  onPhase?: (phase: ChatPhase) => void;
+}
+
+/**
+ * Pipeline phases reported to the client during streaming (M4).
+ * The answer itself still streams only AFTER the safety post-check —
+ * these events only make the wait feel alive.
+ */
+export type ChatPhase = 'preparing' | 'safety' | 'retrieval' | 'generating' | 'verifying';
+
+/** Exception-safe phase emission: a failing listener must never break the pipeline. */
+export function emitPhase(input: { onPhase?: (phase: ChatPhase) => void }, phase: ChatPhase): void {
+  try {
+    input.onPhase?.(phase);
+  } catch {
+    /* listener errors are swallowed by design */
+  }
 }
 
 /** Per-phase latency breakdown in milliseconds. All fields start at 0. */
@@ -58,7 +90,13 @@ export async function retrieveChunks(
   agent: AgentDefinition,
   embedProvider?: EmbedProvider,
   timings?: PhaseTimings,
+  onPhase?: (phase: ChatPhase) => void,
 ): Promise<RetrievalResult[]> {
+  try {
+    onPhase?.('retrieval');
+  } catch {
+    /* fire-and-forget */
+  }
   const results = await hybridSearch(
     query,
     { k: RETRIEVE_DEPTH, specialty: agent.knowledgeFilter?.specialty },
@@ -80,6 +118,61 @@ export function formatChunksForPrompt(chunks: RetrievalResult[]): string {
       return `[${i + 1}] ${meta}\n${body}`;
     })
     .join('\n\n');
+}
+
+/**
+ * History budget for agent prompts (~6000 chars ≈ 1500 tokens).
+ * Keeps multi-turn discussion affordable on the free tier.
+ */
+export const HISTORY_MAX_CHARS = 6000;
+
+/**
+ * Truncates history from the OLDEST side so total chars stay within budget.
+ * A single over-long turn is cut with an ellipsis marker instead of
+ * swallowing the whole budget silently.
+ */
+export function truncateHistory(turns: HistoryTurn[], maxChars = HISTORY_MAX_CHARS): HistoryTurn[] {
+  const out: HistoryTurn[] = [];
+  let used = 0;
+  // Walk newest → oldest so the oldest turns are the first to be dropped.
+  for (const t of [...turns].reverse()) {
+    if (used + t.content.length <= maxChars) {
+      out.unshift(t);
+      used += t.content.length;
+    } else if (out.length === 0 && t.content.length > maxChars) {
+      out.unshift({ role: t.role, content: t.content.slice(0, maxChars - 1) + '…' });
+      break;
+    } else {
+      break; // oldest turns dropped first
+    }
+  }
+  return out;
+}
+
+/** History as real chat messages for the conversational (assistant) agent. */
+export function historyToMessages(history: HistoryTurn[] | undefined): LlmMessage[] {
+  return (history ?? []).map((t) => ({ role: t.role, content: t.content }) as LlmMessage);
+}
+
+/**
+ * Compact history block for the RAG agents. Context only — the existing
+ * hard rules (doses/citations exclusively from retrieved chunks) still apply.
+ */
+export function formatHistoryForPrompt(
+  history: HistoryTurn[] | undefined,
+  lang: Lang,
+): string {
+  if (!history || history.length === 0) return '';
+  const lines = history.map((t) =>
+    lang === 'ar'
+      ? `${t.role === 'user' ? 'المستخدم' : 'المساعد'}: ${t.content}`
+      : `${t.role === 'user' ? 'User' : 'Assistant'}: ${t.content}`,
+  );
+  return (
+    lang === 'ar'
+      ? 'سجل المحادثة (للسياق فقط — أجب عن الرسالة الأخيرة):\n'
+      : 'Conversation history (context only — answer the last message):\n'
+  ) + lines.join('\n') + '\n\n';
 }
 
 /**

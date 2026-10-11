@@ -54,18 +54,31 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       }
       const passwordHash = await hashPassword(body.password);
       const verifyToken = randomBytes(32).toString('hex');
-      const user = await prisma.user.create({
-        data: {
-          email: body.email,
-          name: body.name,
-          passwordHash,
-          // First user ever becomes ADMIN (bootstrap); everyone else is USER.
-          // Role is server-assigned only — never taken from the request body.
-          role: (await prisma.user.count()) === 0 ? 'ADMIN' : 'USER',
-          preferredLang: body.preferredLang ?? 'AR',
-          emailVerified: false,
-          verifyToken,
-        },
+      // P3: email-verification links expire after 24h (like resetToken's 1h).
+      // P3: the ADMIN bootstrap check (count === 0) is done inside a
+      // transaction guarded by an advisory lock — two concurrent first
+      // registrations can no longer both observe an empty table (TOCTOU).
+      const user = await prisma.$transaction(async (tx) => {
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('medassist_register_bootstrap'))`;
+        const created = await tx.user.create({
+          data: {
+            email: body.email,
+            name: body.name,
+            passwordHash,
+            // Role is server-assigned only — never taken from the request body.
+            // Created as USER; promoted below only if truly the first row.
+            role: 'USER',
+            preferredLang: body.preferredLang ?? 'AR',
+            emailVerified: false,
+            verifyToken,
+            verifyTokenExpiry: new Date(Date.now() + 24 * 60 * 60 * 1000),
+          },
+        });
+        // First user ever becomes ADMIN (bootstrap); everyone else is USER.
+        if ((await tx.user.count()) === 1) {
+          return tx.user.update({ where: { id: created.id }, data: { role: 'ADMIN' } });
+        }
+        return created;
       });
       await prisma.auditLog.create({ data: { userId: user.id, action: 'auth.register' } });
       // Best-effort: registration succeeds even if the email fails to send.
@@ -85,7 +98,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       if (!user || !(await verifyPassword(body.password, user.passwordHash))) {
         return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Invalid credentials' } });
       }
-      const token = signToken({ sub: user.id, role: user.role });
+      const token = signToken({ sub: user.id, role: user.role, tv: user.tokenVersion });
       await prisma.auditLog.create({ data: { userId: user.id, action: 'auth.login' } });
       return reply.send({ token, user: publicUser(user) });
     },
@@ -134,7 +147,7 @@ const googleSchema = z.object({
         // by logging in — never create a duplicate.
         await prisma.auditLog.create({ data: { userId: user.id, action: 'auth.google.login' } });
       }
-      const token = signToken({ sub: user.id, role: user.role });
+      const token = signToken({ sub: user.id, role: user.role, tv: user.tokenVersion });
       return reply.send({ token, user: publicUser(user) });
     },
   );
@@ -148,14 +161,14 @@ const googleSchema = z.object({
         return reply.code(400).send({ error: { code: 'BAD_REQUEST', message: 'Missing token' } });
       }
       const user = await prisma.user.findUnique({ where: { verifyToken: token } });
-      if (!user) {
+      if (!user || (user.verifyTokenExpiry && user.verifyTokenExpiry.getTime() < Date.now())) {
         return reply
           .code(400)
           .send({ error: { code: 'INVALID_TOKEN', message: 'Invalid or expired token' } });
       }
       await prisma.user.update({
         where: { id: user.id },
-        data: { emailVerified: true, verifyToken: null },
+        data: { emailVerified: true, verifyToken: null, verifyTokenExpiry: null },
       });
       await prisma.auditLog.create({ data: { userId: user.id, action: 'auth.email.verified' } });
       return reply.send({ ok: true });
@@ -227,6 +240,8 @@ const googleSchema = z.object({
           resetToken: null,
           resetTokenExpiry: null,
           hasPassword: true,
+          // H5: revoke all previously issued sessions — their tv no longer matches.
+          tokenVersion: { increment: 1 },
         },
       });
       await prisma.auditLog.create({ data: { userId: user.id, action: 'auth.password.reset.completed' } });

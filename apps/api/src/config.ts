@@ -42,6 +42,11 @@ const envSchema = z.object({
   RESEND_FROM: z.string().default('MedAssist <onboarding@resend.dev>'),
   // Public URL of the web app, used to build email verification links.
   APP_WEB_URL: z.string().default('https://medassist-app-sun3.onrender.com'),
+  // P3: CORS origins via env (comma-separated). Defaults preserve the
+  // previously hardcoded list — no behavior change without the env var.
+  CORS_ORIGINS: z
+    .string()
+    .default('https://medassist-app-sun3.onrender.com,http://localhost:8081,http://localhost:19006'),
 });
 
 export type Config = z.infer<typeof envSchema>;

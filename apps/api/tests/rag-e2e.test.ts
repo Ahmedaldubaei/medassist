@@ -216,3 +216,44 @@ describe('rag e2e (fake embeddings)', () => {
     expect(body.results[0].score).toBeGreaterThan(0);
   });
 });
+
+describe('rag arabic keyword leg (arabic FTS config)', () => {
+  beforeAll(async () => {
+    __setEmbedProvider(fake);
+  });
+
+  beforeEach(async () => {
+    await cleanDb();
+  });
+
+  afterAll(async () => {
+    __setEmbedProvider(null);
+    await prisma.$disconnect();
+  });
+
+  it('keyword leg matches Arabic queries via the arabic text-search config', async () => {
+    const doc = await prisma.knowledgeDocument.create({
+      data: { title: 'التخدير الناحي', source: 'test-source', license: 'test' },
+    });
+    const chunk = await prisma.knowledgeChunk.create({
+      data: {
+        documentId: doc.id,
+        textAr: 'التخدير الناحي يشمل التخدير الشوكي والتخدير فوق الجافية. يجب مراقبة ضغط الدم بعد الحقن.',
+        textEn: 'Regional anesthesia includes spinal and epidural anesthesia.',
+      },
+    });
+
+    // 1) Raw keyword-leg check: the arabic config must match an Arabic query term.
+    const rows = (await prisma.$queryRaw`
+      SELECT id FROM "KnowledgeChunk"
+      WHERE search_vector @@ plainto_tsquery('arabic', 'التخدير الشوكي')
+    `) as { id: string }[];
+    expect(rows.map((r) => r.id)).toContain(chunk.id);
+
+    // 2) End-to-end: hybridSearch with an Arabic query finds the chunk even
+    // though the fake embedder's vocabulary is English-only (the vector leg
+    // contributes nothing Arabic-specific, so the keyword leg must carry it).
+    const results = await hybridSearch('التخدير الشوكي ومراقبة ضغط الدم', { k: 5 }, fake);
+    expect(results.map((r) => r.documentId)).toContain(doc.id);
+  });
+});

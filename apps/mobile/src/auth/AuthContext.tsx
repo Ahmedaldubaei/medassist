@@ -2,7 +2,7 @@
  * Auth state: token + user, loaded from secure storage, validated via /me.
  */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { api, tokenStore, type PublicUser } from '../api/client';
+import { api, tokenStore, onUnauthorized, type PublicUser } from '../api/client';
 import type { Lang } from '../i18n';
 import { langStore } from '../api/client';
 
@@ -56,6 +56,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setToken(null);
     setUser(null);
   }, []);
+
+  // M2: central 401 handling — any authenticated API call rejected with 401
+  // (revoked session, deleted account, expiry) signs out here, which routes
+  // the app to login via the token/user state. signOut makes no API calls,
+  // so there is no recursion risk.
+  useEffect(() => onUnauthorized(() => void signOut()), [signOut]);
 
   const setLang = useCallback(async (l: Lang) => {
     await langStore.set(l);

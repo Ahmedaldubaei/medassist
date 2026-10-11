@@ -4,6 +4,13 @@ import { config } from '../config.js';
 export interface TokenPayload {
   sub: string;
   role: string;
+  /**
+   * Session version (H5): must match User.tokenVersion at request time.
+   * Bumped on password reset/change and account deletion so previously
+   * issued tokens stop working. Absent in pre-H5 tokens → treated as 0,
+   * which matches the DB default for existing users.
+   */
+  tv: number;
 }
 
 export function signToken(payload: TokenPayload): string {
@@ -15,5 +22,10 @@ export function verifyToken(token: string): TokenPayload {
   if (typeof decoded === 'string' || !decoded.sub) {
     throw new Error('Invalid token payload');
   }
-  return { sub: decoded.sub as string, role: decoded.role as string };
+  const tv = decoded.tv;
+  return {
+    sub: decoded.sub as string,
+    role: decoded.role as string,
+    tv: typeof tv === 'number' && Number.isInteger(tv) && tv >= 0 ? tv : 0,
+  };
 }

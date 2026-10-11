@@ -34,6 +34,26 @@ export interface EmergencyHit {
 }
 
 /**
+ * Arabic orthographic normalization (policy §4.1: spelling variants).
+ * Applied to BOTH the message and the keyword lists before matching, so
+ * dialectal spellings like "حساسيه" match "حساسية" and vice versa.
+ * - أ/إ/آ → ا
+ * - ة → ه
+ * - ى → ي
+ */
+export function normalizeArabic(text: string): string {
+  return text
+    .replace(/[أإآ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي');
+}
+
+/** Normalizes a keyword for comparison (lowercase + Arabic normalization). */
+function normKw(kw: string): string {
+  return normalizeArabic(kw.toLowerCase());
+}
+
+/**
  * Emergency keyword lists (AR + EN), two tiers.
  *
  * Tier 1 (EMERGENCY_KEYWORDS): inherently acute phrasing — always escalate.
@@ -49,35 +69,61 @@ export interface EmergencyHit {
 const EMERGENCY_KEYWORDS: Record<EmergencyCategory, string[]> = {
   cardiac_arrest: [
     'توقف القلب', 'توقف قلبي', 'توقف النبض', 'النبض متوقف', 'لا يوجد نبض',
+    // Yemeni/Gulf dialect variants (policy §4.1, tests E-02)
+    'قلبه وقف', 'القلب وقف', 'قلبه توقف', 'توقف قلبه', 'توقف قلب المريض',
     'cardiac arrest', 'heart stopped', 'no pulse', 'pulseless',
   ],
   respiratory_arrest: [
     'توقف عن التنفس', 'توقف التنفس', 'توقف تنفسي', 'لا يتنفس', 'توقف النفس',
     'اختناق', 'يختنق', 'زرقة', 'تنفس احتضاري', 'تنفس متقطع',
+    // dialect variants
+    'ما يتنفس', 'مب قادر يتنفس', 'مو قادر يتنفس', 'ما يقدر يتنفس',
+    'تنفسه وقف', 'انقطع نفسه', 'نفسه انقطع', 'ما فيه نفس',
     'apnea', 'apnoea', 'not breathing',
     "can't breathe", 'cannot breathe', 'respiratory arrest', 'stopped breathing',
     'choking', 'cyanosis', 'agonal breathing', 'gasping',
   ],
   severe_bleeding: [
     'نزيف حاد', 'نزيف شديد', 'نزيف غزير', 'نزيف لا يتوقف', 'فقدان دم',
+    // dialect variants
+    'نزيف قوي', 'ينزف بقوة', 'ينزف كثير', 'دم كثير', 'نزف قوي',
     'severe bleeding', 'heavy bleeding', 'hemorrhage', 'bleeding heavily',
     'uncontrolled bleeding', 'massive bleeding', 'losing blood',
   ],
   anaphylaxis: [
     'حساسية مفرطة', 'صدمة تحسسية', 'صدمة الحساسية', 'وذمة وعائية',
+    // dialect variants (orthographic normalization maps ة↔ه)
+    'حساسيه من البنج', 'حساسية البنج', 'تحسس من البنج', 'صدمه تحسسيه',
     'anaphylaxis', 'anaphylactic shock', 'angioedema',
   ],
-  seizure: ['نوبة صرع', 'نوبة تشنج', 'تشنجات مستمرة', 'seizure', 'convulsion', 'status epilepticus'],
+  seizure: [
+    'نوبة صرع', 'نوبة تشنج', 'تشنجات مستمرة',
+    // dialect variants
+    'يتشنج', 'قاعد يتشنج', 'تشنج مستمر',
+    'seizure', 'convulsion', 'status epilepticus',
+  ],
   chest_pain: [
     'ألم صدر', 'ألم في الصدر', 'ألم شديد في الصدر', 'ألم صدري شديد', 'وجع الصدر', 'وجع في الصدر',
+    // dialect variants
+    'صدره يعوره', 'وجع بصدره', 'الم بالصدر',
     'chest pain', 'crushing chest', 'pressure in chest',
   ],
   stroke: [
     'سكتة دماغية', 'جلطة دماغية', 'شلل مفاجئ', 'تدلي الوجه', 'صعوبة مفاجئة في الكلام',
+    // dialect variants
+    'جلطه', 'انشل', 'وجهه مائل',
     'stroke', 'facial droop', 'sudden weakness', 'slurred speech',
   ],
-  shock: [],
-  unconscious: [],
+  shock: [
+    // Hypotension reports are acute in anesthesia context (policy §4.1:
+    // conservative rules where a miss is high-consequence). Tier 1.
+    'ضغطه نازل', 'الضغط نازل', 'ضغط المريض نازل', 'هبوط حاد في الضغط',
+    'blood pressure crashing', 'severe hypotension',
+  ],
+  unconscious: [
+    // dialect variants (tier 1: inherently acute phrasing)
+    'طاح', 'طاح المريض', 'غمي عليه', 'مغمى عليه',
+  ],
   airway_emergency: [
     'cannot intubate', "can't intubate", 'cannot ventilate', "can't ventilate",
     'stridor', 'sats dropping', 'desaturation',
@@ -106,6 +152,7 @@ const TOPIC_EMERGENCY_KEYWORDS: Record<TopicCategory, string[]> = {
   ],
   last_toxicity: [
     'تسمم بالمخدر الموضعي', 'تسمم المخدر الموضعي',
+    'سمية المخدر الموضعي', 'سمية مخدر موضعي',
     'local anesthetic toxicity', 'local anaesthetic toxicity',
   ],
 };
@@ -130,31 +177,51 @@ export function detectLanguage(text: string): Lang {
 }
 
 /**
+ * Educational-question guard (test-plan E-04): an explicit definition /
+ * explanation request with NO acute markers is a knowledge question, not an
+ * incident report — e.g. "ما هو تعريف توقف القلب؟" must NOT escalate even
+ * though it contains a tier-1 keyword. Any acute marker present keeps the
+ * conservative escalate behavior.
+ */
+const EDUCATIONAL_PREFIXES = [
+  'ما هو تعريف', 'ما تعريف', 'ما المقصود', 'عرف ', 'اشرح ',
+  'what is the definition of', 'define ', 'explain ',
+];
+
+function isEducationalQuestion(norm: string): boolean {
+  return EDUCATIONAL_PREFIXES.some((p) => norm.includes(normKw(p)));
+}
+
+/**
  * Deterministic emergency scan. Two tiers:
  *  - Tier 1: inherently acute phrasing → escalate immediately.
  *  - Tier 2: topic-like terms (MH, shock, airway, LAST, unconscious) →
  *    escalate only when an acute marker shows this is a patient report,
  *    not a knowledge question.
+ * Both the message and the keyword lists go through Arabic orthographic
+ * normalization (أ/إ/آ→ا، ة→ه، ى→ي) before matching (policy §4.1).
  * Returns the first hit or null.
  */
 export function detectEmergency(text: string): EmergencyHit | null {
-  const low = text.toLowerCase();
+  const norm = normalizeArabic(text.toLowerCase());
+  const acute = ACUTE_MARKERS.some((m) => norm.includes(normKw(m)));
+  // E-04: explicit educational question without acute markers → not an incident.
+  if (!acute && isEducationalQuestion(norm)) return null;
   for (const [category, keywords] of Object.entries(EMERGENCY_KEYWORDS) as Array<
     [EmergencyCategory, string[]]
   >) {
     for (const kw of keywords) {
-      if (kw.length > 0 && low.includes(kw.toLowerCase())) {
+      if (kw.length > 0 && norm.includes(normKw(kw))) {
         return { category, matched: kw };
       }
     }
   }
-  const acute = ACUTE_MARKERS.some((m) => low.includes(m.toLowerCase()));
   if (!acute) return null;
   for (const [category, keywords] of Object.entries(TOPIC_EMERGENCY_KEYWORDS) as Array<
     [TopicCategory, string[]]
   >) {
     for (const kw of keywords) {
-      if (low.includes(kw.toLowerCase())) {
+      if (norm.includes(normKw(kw))) {
         return { category, matched: kw };
       }
     }

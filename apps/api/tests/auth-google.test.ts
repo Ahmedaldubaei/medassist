@@ -161,4 +161,28 @@ describe('email verification', () => {
     const missing = await app.inject({ method: 'GET', url: '/api/v1/auth/verify-email' });
     expect(missing.statusCode).toBe(400);
   });
+
+  it('rejects expired verify tokens (P3: 24h expiry)', async () => {
+    const reg = await app.inject({
+      method: 'POST',
+      url: '/api/v1/auth/register',
+      payload: { email: 'expired-verify@example.com', name: 'Expired', password: 'secret123' },
+    });
+    expect(reg.statusCode).toBe(201);
+    const dbUser = await prisma.user.findUnique({ where: { email: 'expired-verify@example.com' } });
+    expect(dbUser?.verifyTokenExpiry).toBeTruthy();
+    // Backdate the expiry to simulate an old link.
+    await prisma.user.update({
+      where: { id: dbUser!.id },
+      data: { verifyTokenExpiry: new Date(Date.now() - 1000) },
+    });
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/v1/auth/verify-email?token=${dbUser!.verifyToken}`,
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe('INVALID_TOKEN');
+    const still = await prisma.user.findUnique({ where: { email: 'expired-verify@example.com' } });
+    expect(still?.emailVerified).toBe(false);
+  });
 });

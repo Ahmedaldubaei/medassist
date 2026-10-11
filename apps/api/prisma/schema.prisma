@@ -29,7 +29,10 @@ enum MessageRole {
 enum SafetyVerdict {
   PASS
   FLAG
+  CLARIFY
+  ESCALATE
   BLOCK
+  SAFE_FALLBACK
 }
 
 model User {
@@ -41,9 +44,11 @@ model User {
   preferredLang PreferredLang  @default(AR)
   emailVerified Boolean        @default(false)
   verifyToken   String?        @unique
+  verifyTokenExpiry DateTime?
   resetToken       String?   @unique
   resetTokenExpiry DateTime?
   hasPassword      Boolean   @default(true)
+  tokenVersion     Int       @default(0)
   createdAt     DateTime       @default(now())
   conversations Conversation[]
   auditLogs     AuditLog[]
@@ -55,6 +60,7 @@ model Conversation {
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   title     String    @default("New conversation")
   createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
   messages  Message[]
   agentRuns AgentRun[]
 
@@ -71,6 +77,8 @@ model Message {
   citationsJson Json?
   confidence    Float?
   pinned        Boolean       @default(false)
+  disclaimer    String?
+  verdict       String?
   createdAt     DateTime      @default(now())
   safetyReview  SafetyReview?
 

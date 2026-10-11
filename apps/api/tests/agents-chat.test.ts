@@ -4,7 +4,7 @@ import { prisma } from '../src/db.js';
 import { ingestDocument } from '../src/rag/ingest.js';
 import { __setEmbedProvider, type EmbedProvider, type EmbedKind } from '../src/rag/embeddings.js';
 import { __setLlmProvider, MockProvider } from '../src/llm/index.js';
-import { runChat } from '../src/agents/pipeline.js';
+import { runChat, conversationTitle } from '../src/agents/pipeline.js';
 
 /** Deterministic fake embedder (same idea as the RAG e2e test). */
 class FakeEmbed implements EmbedProvider {
@@ -156,7 +156,10 @@ describe('chat e2e (mock LLM + fake embeddings)', () => {
       where: { message: { conversationId: body.conversationId } },
     });
     expect(review!.escalated).toBe(true);
-    expect(review!.verdict).toBe('BLOCK');
+    // Policy v2.0-draft §9.3: the emergency path now records ESCALATE
+    // (was BLOCK). The `escalated` boolean is kept for backward compat.
+    expect(review!.verdict).toBe('ESCALATE');
+    expect(body.safetyVerdict).toBe('ESCALATE');
   });
 
   it('requires authentication', async () => {
@@ -200,5 +203,30 @@ describe('chat e2e (mock LLM + fake embeddings)', () => {
     expect(exam.escalated).toBe(false);
     expect(exam.agentUsed).not.toBe('safety');
     expect(exam.disclaimer.length).toBeGreaterThan(0); // disclaimer stays active
+  });
+});
+
+describe('conversationTitle (P3 word-boundary)', () => {
+  it('backs up to the previous space instead of cutting mid-word', () => {
+    // 40-char window ends inside the y-run; must back up to the space at 30.
+    const t = conversationTitle('x'.repeat(30) + ' ' + 'y'.repeat(30));
+    expect(t).toBe('x'.repeat(30));
+  });
+
+  it('falls back to a hard cut for a single long word', () => {
+    const t = conversationTitle('a'.repeat(60));
+    expect(t).toBe('a'.repeat(40));
+  });
+
+  it('keeps short messages intact', () => {
+    expect(conversationTitle('مرحبا')).toBe('مرحبا');
+  });
+
+  it('handles a real Arabic message without mid-word cuts', () => {
+    const t = conversationTitle('اريد مساعدتكم في حاله تحتاج تخدير موضعي للعملية');
+    expect(t.length).toBeLessThanOrEqual(40);
+    // The cut must land on a word boundary (next char in source is space/end).
+    const src = 'اريد مساعدتكم في حاله تحتاج تخدير موضعي للعملية';
+    expect([' ', undefined]).toContain(src[t.length]);
   });
 });

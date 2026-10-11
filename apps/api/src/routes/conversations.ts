@@ -36,12 +36,12 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
 
       const conversations = await prisma.conversation.findMany({
         where: { userId },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
         take: query.limit + 1,
         ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
         include: {
           _count: { select: { messages: true } },
-          messages: { orderBy: { createdAt: 'desc' }, take: 1 },
+          messages: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1 },
         },
       });
 
@@ -108,6 +108,8 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
           agentUsed: m.agentUsed,
           citations: m.citationsJson ?? [],
           confidence: m.confidence,
+          disclaimer: m.disclaimer,
+          verdict: m.verdict,
           pinned: m.pinned,
           createdAt: m.createdAt.toISOString(),
         })),
@@ -167,7 +169,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
           content: { contains: q, mode: 'insensitive' },
           conversation: { userId },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: 20,
         include: { conversation: { select: { id: true, title: true } } },
       });
@@ -198,7 +200,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
 
       const messages = await prisma.message.findMany({
         where: { pinned: true, conversation: { userId } },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take: 50,
         include: { conversation: { select: { id: true, title: true } } },
       });
@@ -231,7 +233,7 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
 
       const conversation = await prisma.conversation.findFirst({
         where: { id: params.id, userId },
-        include: { messages: { orderBy: { createdAt: 'desc' }, take: 20 } },
+        include: { messages: { orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 20 } },
       });
       if (!conversation) {
         return reply.code(404).send({
@@ -308,6 +310,97 @@ export async function conversationRoutes(app: FastifyInstance): Promise<void> {
         data: { pinned: body.pinned },
       });
       return reply.send({ ok: true, pinned: body.pinned });
+    },
+  );
+
+  // Edit a user message (ChatGPT-style): update the content, drop every
+  // message after it, touch the conversation. The client re-runs regenerate
+  // to stream the fresh answer. Refuses when a pinned message exists after
+  // the target — editing would silently destroy user-saved content.
+  app.patch(
+    '/api/v1/messages/:id',
+    {
+      preHandler: [app.authenticate],
+      config: { rateLimit: { max: 60, timeWindow: '1 minute' } },
+    },
+    async (request, reply) => {
+      const params = z.object({ id: z.string().cuid() }).parse(request.params);
+      const body = z.object({ content: z.string().trim().min(1).max(4000) }).parse(request.body);
+      const userId = request.user!.sub;
+
+      const message = await prisma.message.findFirst({
+        where: { id: params.id, conversation: { userId } },
+        select: {
+          id: true,
+          role: true,
+          content: true,
+          createdAt: true,
+          conversationId: true,
+        },
+      });
+      if (!message) {
+        return reply.code(404).send({
+          error: { code: 'NOT_FOUND', message: 'Message not found' },
+        });
+      }
+      if (message.role !== 'USER') {
+        return reply.code(400).send({
+          error: { code: 'NOT_EDITABLE', message: 'Only your own messages can be edited' },
+        });
+      }
+
+      // "After" per the canonical message ordering [{ createdAt }, { id }]
+      // (same tiebreaker as the P3 ordering fix).
+      const afterPredicate = {
+        OR: [
+          { createdAt: { gt: message.createdAt } },
+          { createdAt: message.createdAt, id: { gt: message.id } },
+        ],
+      };
+
+      const pinnedAfter = await prisma.message.findFirst({
+        where: { conversationId: message.conversationId, pinned: true, ...afterPredicate },
+        select: { id: true },
+      });
+      if (pinnedAfter) {
+        return reply.code(409).send({
+          error: {
+            code: 'PINNED_AFTER',
+            message: 'A pinned message after this one blocks the edit',
+          },
+        });
+      }
+
+      // Drop everything after the edited message. Their safety reviews
+      // cascade via the schema (same as the regenerate endpoint).
+      const [deleted] = await prisma.$transaction([
+        prisma.message.deleteMany({
+          where: { conversationId: message.conversationId, ...afterPredicate },
+        }),
+        prisma.message.update({
+          where: { id: message.id },
+          data: { content: body.content },
+        }),
+        // Explicit touch — Prisma doesn't bump @updatedAt on unrelated writes.
+        prisma.conversation.update({
+          where: { id: message.conversationId },
+          data: { updatedAt: new Date() },
+        }),
+        prisma.auditLog.create({
+          data: {
+            userId,
+            action: 'message.edit',
+            detailsJson: { conversationId: message.conversationId, messageId: message.id },
+          },
+        }),
+      ]);
+
+      return reply.send({
+        id: message.id,
+        content: body.content,
+        createdAt: message.createdAt.toISOString(),
+        deletedCount: deleted.count,
+      });
     },
   );
 }

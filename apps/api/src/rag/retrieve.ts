@@ -91,10 +91,13 @@ export async function hybridSearch(
   `) as RankedRow[];
 
   // 2) Keyword search (full-text over the generated tsvector column).
+  // Uses the 'arabic' text-search configuration: the corpus is Arabic-first
+  // and the 'english' config provides no stemming/stop-words for Arabic,
+  // which left the keyword leg near-dead for Arabic queries.
   const keywordRows = (await prisma.$queryRaw`
     SELECT "KnowledgeChunk".id FROM "KnowledgeChunk"
-    WHERE search_vector @@ plainto_tsquery('english', ${q}) ${specialtyFilter}
-    ORDER BY ts_rank(search_vector, plainto_tsquery('english', ${q})) DESC
+    WHERE search_vector @@ plainto_tsquery('arabic', ${q}) ${specialtyFilter}
+    ORDER BY ts_rank(search_vector, plainto_tsquery('arabic', ${q})) DESC
     LIMIT ${depth}
   `) as RankedRow[];
 

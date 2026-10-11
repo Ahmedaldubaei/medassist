@@ -121,6 +121,22 @@ describe('auth routes', () => {
     expect(reg.json().user.role).toBe('ADMIN');
   });
 
+  it('concurrent first registrations yield at most one ADMIN (P3 TOCTOU fix)', async () => {
+    const results = await Promise.all(
+      ['race1@example.com', 'race2@example.com', 'race3@example.com'].map((email) =>
+        app.inject({
+          method: 'POST',
+          url: '/api/v1/auth/register',
+          payload: { email, name: 'Race', password: 'secret123' },
+        }),
+      ),
+    );
+    for (const r of results) expect(r.statusCode).toBe(201);
+    const roles = results.map((r) => (r.json() as { user: { role: string } }).user.role);
+    expect(roles.filter((r) => r === 'ADMIN').length).toBe(1);
+    expect(roles.filter((r) => r === 'USER').length).toBe(2);
+  });
+
   it('ignores client-supplied role: later users always get USER (P6 privilege-escalation fix)', async () => {
     await app.inject({
       method: 'POST',

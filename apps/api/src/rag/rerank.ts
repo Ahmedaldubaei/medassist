@@ -42,8 +42,10 @@ export function contrastMultiplier(query: string, chunkText: string): number {
     const qPos = q.includes(en[0]) || q.includes(ar[0]);
     const qNeg = q.includes(en[1]) || q.includes(ar[1]);
     if (qPos && !qNeg) {
-      const cNeg = c.includes(en[1]);
-      const cPos = c.includes(en[0]);
+      // P3: check Arabic chunk text too (was English-only) — symmetric with
+      // the query check above.
+      const cNeg = c.includes(en[1]) || c.includes(ar[1]);
+      const cPos = c.includes(en[0]) || c.includes(ar[0]);
       if (cNeg && !cPos) return 0.25; // chunk is about the opposite condition
     }
   }

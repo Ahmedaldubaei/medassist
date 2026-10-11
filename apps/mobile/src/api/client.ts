@@ -31,13 +31,15 @@ export interface Citation {
   license: string;
 }
 
+export type SafetyVerdictUI = 'PASS' | 'FLAG' | 'CLARIFY' | 'ESCALATE' | 'BLOCK' | 'SAFE_FALLBACK' | 'UNKNOWN';
+
 export interface ChatResponse {
   answer: string;
   citations: Citation[];
   confidence: number;
   disclaimer: string;
   agentUsed: string;
-  safetyVerdict: 'PASS' | 'FLAG' | 'BLOCK';
+  safetyVerdict: SafetyVerdictUI;
   conversationId: string;
   escalated: boolean;
 }
@@ -51,6 +53,8 @@ export interface ChatMessage {
   /** Backend message id (present for persisted messages) — needed for pin. */
   backendId?: string;
   pinned?: boolean;
+  /** Local-only: the send failed and this message was never persisted. */
+  failed?: boolean;
 }
 
 export class ApiError extends Error {
@@ -105,6 +109,39 @@ export const langStore = {
   set: (l: string) => kvSet(LANG_KEY, l),
 };
 
+/* ------------------------- unauthorized handling ------------------------ */
+/**
+ * Central 401 handling (audit M2): when an authenticated request gets 401,
+ * the stored token is cleared and subscribers are notified so the app can
+ * route to login. AuthContext subscribes and calls signOut().
+ *
+ * Only fires for requests that actually carried a token — a 401 from
+ * login/register (invalid credentials) must NOT sign anyone out.
+ * Callbacks are invoked synchronously; signOut itself makes no API calls,
+ * so there is no recursion risk.
+ */
+type UnauthorizedHandler = () => void;
+const unauthorizedHandlers = new Set<UnauthorizedHandler>();
+
+export function onUnauthorized(cb: UnauthorizedHandler): () => void {
+  unauthorizedHandlers.add(cb);
+  return () => {
+    unauthorizedHandlers.delete(cb);
+  };
+}
+
+function notifyUnauthorized(): void {
+  // Clear first so any handler that reads the store sees the signed-out state.
+  void tokenStore.clear();
+  for (const cb of [...unauthorizedHandlers]) {
+    try {
+      cb();
+    } catch {
+      /* a failing UI handler must not break the client */
+    }
+  }
+}
+
 export interface ConversationListItem {
   id: string;
   title: string;
@@ -125,6 +162,9 @@ export interface ConversationMessageItem {
   agentUsed: string | null;
   citations: Citation[];
   confidence: number | null;
+  /** M5: persisted disclaimer/verdict — read from the server, never fabricated. */
+  disclaimer: string | null;
+  verdict: string | null;
   pinned: boolean;
   createdAt: string;
 }
@@ -140,7 +180,7 @@ export interface ChatStreamMeta {
   confidence: number;
   disclaimer: string;
   agentUsed: string;
-  safetyVerdict: 'PASS' | 'FLAG' | 'BLOCK';
+  safetyVerdict: SafetyVerdictUI;
   conversationId: string;
   escalated: boolean;
 }
@@ -216,6 +256,10 @@ async function request<T>(path: string, init: RequestInit = {}, token?: string |
   const res = await fetch(`${BASE_URL}${path}`, { ...init, headers: { ...headers, ...(init.headers as Record<string, string> | undefined) } });
   const data = (await res.json().catch(() => ({}))) as { error?: { code?: string; message?: string } };
   if (!res.ok) {
+    // M2: an authenticated call rejected with 401 means the session is dead
+    // (revoked token, deleted account, expiry) — clear it centrally so the
+    // app routes to login instead of showing generic errors per screen.
+    if (res.status === 401 && token) notifyUnauthorized();
     throw new ApiError(res.status, data.error?.message ?? `Request failed (${res.status})`, data.error?.code);
   }
   return data as T;
@@ -258,24 +302,40 @@ export const api = {
     request<ChatResponse>('/api/v1/chat', { method: 'POST', body: JSON.stringify(body) }, token),
 
   /**
-   * Streaming chat (SSE). Calls onToken for each `event: token` chunk and
+   * Streaming chat (SSE). Calls onToken for each `event: token` chunk,
+   * onStatus for each `event: status` pipeline-phase event (M4), and
    * resolves with the final `event: meta` payload. Throws when streaming is
    * unsupported or the stream fails — callers should fall back to `chat()`.
+   * An `event: error` from the server becomes an ApiError.
    */
   chatStream: async (
     token: string,
     body: { message: string; conversationId?: string },
     onToken: (text: string) => void,
+    signal?: AbortSignal,
+    onStatus?: (phase: string) => void,
+    // P3: resume hint — sent as `Last-Event-ID` when reconnecting. The server
+    // currently ignores it (full resume-from-ID is future work); `retry:`
+    // from the server still improves auto-reconnect behavior.
+    lastEventId?: string,
   ): Promise<ChatStreamMeta> => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    };
+    if (lastEventId) headers['Last-Event-ID'] = lastEventId;
     const res = await fetch(`${BASE_URL}/api/v1/chat/stream`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      headers,
       body: JSON.stringify(body),
+      signal,
     });
     if (!res.ok) {
       const data = (await res.json().catch(() => ({}))) as {
         error?: { code?: string; message?: string };
       };
+      // M2: stream endpoint also authenticates — a 401 here kills the session too.
+      if (res.status === 401) notifyUnauthorized();
       throw new ApiError(
         res.status,
         data.error?.message ?? `Request failed (${res.status})`,
@@ -303,6 +363,16 @@ export const api = {
         }
         if (event === 'token') {
           onToken((JSON.parse(data) as { text: string }).text);
+        } else if (event === 'status') {
+          // M4: pipeline phase — drive the typing indicator, never the answer.
+          try {
+            onStatus?.((JSON.parse(data) as { phase: string }).phase);
+          } catch {
+            /* malformed status event: ignore */
+          }
+        } else if (event === 'error') {
+          const e = JSON.parse(data) as { code?: string; message?: string; status?: number };
+          throw new ApiError(e.status ?? 500, e.message ?? 'Stream failed', e.code);
         } else if (event === 'meta') {
           meta = JSON.parse(data) as ChatStreamMeta;
         }
@@ -360,6 +430,12 @@ export const api = {
         { method: 'PATCH', body: JSON.stringify({ pinned }) },
         token,
       ),
+    edit: (token: string, id: string, content: string) =>
+      request<{ id: string; content: string; createdAt: string; deletedCount: number }>(
+        `/api/v1/messages/${encodeURIComponent(id)}`,
+        { method: 'PATCH', body: JSON.stringify({ content }) },
+        token,
+      ),
   },
 
   clinical: {
@@ -392,19 +468,40 @@ export { BASE_URL };
  * the UI can show the "offline" banner. No background sync.
  */
 const CACHE_PREFIX = 'medassist_cache_v1';
+/** Offline cache entries older than this are treated as expired (never served). */
+const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+interface CacheEntry<T> {
+  cachedAt: number;
+  data: T;
+}
 
 async function cacheSet(scope: string, key: string, value: unknown): Promise<void> {
   try {
-    await AsyncStorage.setItem(`${CACHE_PREFIX}:${scope}:${key}`, JSON.stringify(value));
+    const entry: CacheEntry<unknown> = { cachedAt: Date.now(), data: value };
+    await AsyncStorage.setItem(`${CACHE_PREFIX}:${scope}:${key}`, JSON.stringify(entry));
   } catch {
     /* cache is best-effort */
   }
 }
 
-async function cacheGet<T>(scope: string, key: string): Promise<T | null> {
+async function cacheGet<T>(scope: string, key: string): Promise<CacheEntry<T> | null> {
+  const storageKey = `${CACHE_PREFIX}:${scope}:${key}`;
   try {
-    const raw = await AsyncStorage.getItem(`${CACHE_PREFIX}:${scope}:${key}`);
-    return raw ? (JSON.parse(raw) as T) : null;
+    const raw = await AsyncStorage.getItem(storageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<CacheEntry<T>> | T;
+    // Back-compat: entries written before cachedAt existed have no wrapper.
+    const entry: CacheEntry<T> | null =
+      parsed && typeof parsed === 'object' && 'cachedAt' in parsed && 'data' in parsed
+        ? (parsed as CacheEntry<T>)
+        : { cachedAt: 0, data: parsed as T };
+    if (Date.now() - entry.cachedAt > CACHE_TTL_MS) {
+      // Expired: drop it so a stale copy is never served.
+      await AsyncStorage.removeItem(storageKey).catch(() => {});
+      return null;
+    }
+    return entry;
   } catch {
     return null;
   }
@@ -413,14 +510,14 @@ async function cacheGet<T>(scope: string, key: string): Promise<T | null> {
 export async function listConversationsCached(
   token: string,
   scope: string,
-): Promise<{ data: ConversationListResponse; fromCache: boolean }> {
+): Promise<{ data: ConversationListResponse; fromCache: boolean; cachedAt?: number }> {
   try {
     const data = await api.conversations.list(token, { limit: 50 });
     await cacheSet(scope, 'conversations', data);
     return { data, fromCache: false };
   } catch (err) {
     const cached = await cacheGet<ConversationListResponse>(scope, 'conversations');
-    if (cached) return { data: cached, fromCache: true };
+    if (cached) return { data: cached.data, fromCache: true, cachedAt: cached.cachedAt };
     throw err;
   }
 }
@@ -429,14 +526,14 @@ export async function getMessagesCached(
   token: string,
   scope: string,
   conversationId: string,
-): Promise<{ data: ConversationMessagesResponse; fromCache: boolean }> {
+): Promise<{ data: ConversationMessagesResponse; fromCache: boolean; cachedAt?: number }> {
   try {
     const data = await api.conversations.messages(token, conversationId, { limit: 100 });
     await cacheSet(scope, `messages:${conversationId}`, data);
     return { data, fromCache: false };
   } catch (err) {
     const cached = await cacheGet<ConversationMessagesResponse>(scope, `messages:${conversationId}`);
-    if (cached) return { data: cached, fromCache: true };
+    if (cached) return { data: cached.data, fromCache: true, cachedAt: cached.cachedAt };
     throw err;
   }
 }

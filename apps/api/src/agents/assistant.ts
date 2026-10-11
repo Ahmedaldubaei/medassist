@@ -6,7 +6,7 @@
  * (no doses, no invented citations) are baked into its system prompt.
  */
 import { getAgent } from './registry.js';
-import type { AgentRunInput, AgentRunOutput } from './context.js';
+import { emitPhase, historyToMessages, type AgentRunInput, type AgentRunOutput } from './context.js';
 
 const HELP_AR =
   'أنا المساعد الطبي — مرجع معرفي لطبيب واستشاري التخدير.\n\n' +
@@ -26,9 +26,14 @@ export async function runAssistantAgent(input: AgentRunInput): Promise<AgentRunO
   const def = getAgent('assistant');
   const text = input.query.trim().toLowerCase();
   const wantsHelp = /مساعدة|help|ماذا|ممكن|what can you|who are you|من أنت/.test(text);
+  // Prior turns go in as real messages so follow-ups ("what did I just say?")
+  // are answered with context. The current message stays last.
+  const historyMsgs = historyToMessages(input.history);
+  if (!wantsHelp) emitPhase(input, 'generating');
   const draft = wantsHelp ? (input.lang === 'ar' ? HELP_AR : HELP_EN) : await input.llm.complete(
     [
       { role: 'system', content: def.systemPrompt(input.lang) },
+      ...historyMsgs,
       {
         role: 'user',
         content:

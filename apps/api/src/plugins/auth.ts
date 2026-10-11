@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 import { Role } from '@prisma/client';
 import { verifyToken, type TokenPayload } from '../lib/jwt.js';
+import { prisma } from '../db.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -25,6 +26,22 @@ async function authPlugin(app: FastifyInstance): Promise<void> {
       // before a role was removed from the enum). Roles are server-assigned.
       if (!Object.values(Role).includes(payload.role as Role)) {
         return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token' } });
+      }
+      // H5 session invalidation: the token's session version must match the
+      // user's current tokenVersion. Password resets/changes bump the version,
+      // which revokes all previously issued tokens. Deleted users fail here
+      // (no row → 401), so their tokens die with the account.
+      const user = await prisma.user.findUnique({
+        where: { id: payload.sub },
+        select: { id: true, tokenVersion: true },
+      });
+      if (!user) {
+        return reply.code(401).send({ error: { code: 'UNAUTHORIZED', message: 'User not found' } });
+      }
+      if (user.tokenVersion !== payload.tv) {
+        return reply
+          .code(401)
+          .send({ error: { code: 'TOKEN_REVOKED', message: 'Session expired — please sign in again' } });
       }
       request.user = payload;
     } catch {

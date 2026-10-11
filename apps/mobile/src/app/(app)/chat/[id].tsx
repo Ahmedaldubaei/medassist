@@ -20,11 +20,14 @@ import { useLocalSearchParams, useNavigation, router } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import {
+  ApiError,
   api,
   getMessagesCached,
+  listConversationsCached,
   type ChatMessage,
   type ChatResponse,
   type ConversationMessageItem,
+  type SafetyVerdictUI,
 } from '../../../api/client';
 import { useAuth } from '../../../auth/AuthContext';
 import { t } from '../../../i18n';
@@ -35,7 +38,7 @@ import { ErrorBanner } from '../../../components/ui';
 let msgSeq = 0;
 const nextId = () => `local-${Date.now()}-${msgSeq++}`;
 
-function TypingBubble() {
+function TypingBubble({ label }: { label?: string }) {
   return (
     <View style={[styles.bubble, styles.assistantBubble]}>
       <View style={styles.typingRow}>
@@ -43,8 +46,27 @@ function TypingBubble() {
           <View key={i} style={styles.typingDot} />
         ))}
       </View>
+      {label ? <Text style={styles.typingLabel}>{label}</Text> : null}
     </View>
   );
+}
+
+/** M4: map a server pipeline phase to its localized typing-indicator label. */
+function phaseLabel(phase: string | null, lang: 'ar' | 'en'): string | undefined {
+  switch (phase) {
+    case 'preparing':
+      return t(lang, 'chat.statusPreparing');
+    case 'safety':
+      return t(lang, 'chat.statusSafety');
+    case 'retrieval':
+      return t(lang, 'chat.statusRetrieval');
+    case 'generating':
+      return t(lang, 'chat.statusGenerating');
+    case 'verifying':
+      return t(lang, 'chat.statusVerifying');
+    default:
+      return undefined;
+  }
 }
 
 function toChatMessage(m: ConversationMessageItem, conversationId: string): ChatMessage {
@@ -61,9 +83,12 @@ function toChatMessage(m: ConversationMessageItem, conversationId: string): Chat
       answer: m.content,
       citations: m.citations ?? [],
       confidence: m.confidence ?? 0,
-      disclaimer: '',
+      // M5: disclaimer and verdict come from the persisted server record.
+      // Pre-M5 rows have NULLs: no banner (as before) and an honest
+      // 'UNKNOWN' verdict instead of a fabricated 'PASS'.
+      disclaimer: m.disclaimer ?? '',
       agentUsed: m.agentUsed ?? '',
-      safetyVerdict: 'PASS',
+      safetyVerdict: (m.verdict as SafetyVerdictUI | null) ?? 'UNKNOWN',
       conversationId,
       escalated: false,
     };
@@ -125,7 +150,14 @@ export default function ChatScreen() {
   const [sending, setSending] = useState(false);
   const [streamActive, setStreamActive] = useState(false);
   const [error, setError] = useState('');
+  /** M4: latest pipeline phase from `event: status` — shown in the typing bubble. */
+  const [statusPhase, setStatusPhase] = useState<string | null>(null);
   const [offline, setOffline] = useState(false);
+  /** M7: timestamp of the cached copy being shown (null when online). */
+  const [offlineAt, setOfflineAt] = useState<number | null>(null);
+  /** Message id currently in edit mode (user-message editing). */
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState('');
   const [conversationId, setConversationId] = useState<string | undefined>(id === 'new' ? undefined : id);
   const listRef = useRef<FlatList>(null);
   const navigation = useNavigation();
@@ -149,6 +181,9 @@ export default function ChatScreen() {
     setActiveId(id);
     setMessages([]);
     setOffline(false);
+    setOfflineAt(null);
+    setEditingId(null);
+    setEditDraft('');
     setConversationId(id === 'new' ? undefined : id);
   }
 
@@ -158,9 +193,10 @@ export default function ChatScreen() {
     async (cid: string) => {
       if (!token) return;
       try {
-        const { data, fromCache } = await getMessagesCached(token, scope, cid);
+        const { data, fromCache, cachedAt } = await getMessagesCached(token, scope, cid);
         setMessages(data.messages.map((m) => toChatMessage(m, cid)));
         setOffline(fromCache);
+        setOfflineAt(fromCache ? (cachedAt ?? null) : null);
         setError('');
       } catch {
         setError(t(lang, 'chat.errLoad'));
@@ -176,53 +212,173 @@ export default function ChatScreen() {
     void reloadMessages(id);
   }, [id, reloadMessages]);
 
+  /**
+   * After a stream failure, check whether the server already persisted an
+   * assistant reply to `text` in conversation `cid`. The pipeline may have
+   * completed server-side even though the SSE read failed — in that case we
+   * display the existing reply instead of re-sending (which would persist a
+   * duplicate user message + answer).
+   */
+  const serverHasReply = useCallback(
+    async (cid: string, text: string): Promise<boolean> => {
+      if (!token) return false;
+      try {
+        const { data } = await getMessagesCached(token, scope, cid);
+        const msgs = data.messages;
+        const now = Date.now();
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const m = msgs[i]!;
+          if (
+            m.role === 'USER' &&
+            m.content === text &&
+            now - Date.parse(m.createdAt) < 5 * 60 * 1000
+          ) {
+            const replied = msgs.slice(i + 1).some((x) => x.role !== 'USER');
+            if (replied) {
+              setMessages(msgs.map((x) => toChatMessage(x, cid)));
+              setOffline(false);
+              setOfflineAt(null);
+              setError('');
+              return true;
+            }
+            return false;
+          }
+        }
+        return false;
+      } catch {
+        return false;
+      }
+    },
+    [token, scope],
+  );
+
+  /**
+   * New-chat case: we don't know the server's conversation id after a stream
+   * failure, so look for a reply to `text` in recently created conversations.
+   * Returns the conversation id when a reply was found (and displayed).
+   */
+  const findReplyInRecentConversations = useCallback(
+    async (text: string): Promise<string | null> => {
+      if (!token) return null;
+      try {
+        const { data } = await listConversationsCached(token, scope);
+        const cutoff = Date.now() - 3 * 60 * 1000;
+        for (const c of data.conversations) {
+          if (Date.parse(c.createdAt) < cutoff) continue;
+          if (await serverHasReply(c.id, text)) return c.id;
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    },
+    [token, scope, serverHasReply],
+  );
+
+  const doSend = useCallback(
+    async (text: string) => {
+      if (!token) return;
+      setError('');
+      const userMsg: ChatMessage = { id: nextId(), role: 'user', text, createdAt: Date.now() };
+      const assistantId = nextId();
+      const placeholder: ChatMessage = {
+        id: assistantId,
+        role: 'assistant',
+        text: '',
+        createdAt: Date.now(),
+      };
+      setMessages((prev) => [...prev, userMsg, placeholder]);
+      setSending(true);
+      setStreamActive(false);
+      setStatusPhase(null);
+      try {
+        let streamed = '';
+        const meta = await api.chatStream(
+          token,
+          { message: text, conversationId },
+          (tok) => {
+            streamed += tok;
+            const snapshot = streamed;
+            setStreamActive(true);
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantId ? { ...m, text: snapshot } : m)),
+            );
+          },
+          // Hung connections must not disable the input forever (audit 2.3).
+          AbortSignal.timeout(120_000),
+          // M4: pipeline phase → live typing-indicator label.
+          (phase) => setStatusPhase(phase),
+        );
+        setConversationId(meta.conversationId);
+        // Reload to sync backend ids (needed for pin) and persisted citations.
+        await reloadMessages(meta.conversationId);
+      } catch (err) {
+        const isTimeout = err instanceof Error && err.name === 'TimeoutError';
+        // The server pipeline may have completed despite the stream failing.
+        // Check for an existing reply FIRST — never re-send blindly.
+        let recovered = false;
+        if (conversationId) {
+          recovered = await serverHasReply(conversationId, text);
+        } else {
+          const cid = await findReplyInRecentConversations(text);
+          if (cid) {
+            setConversationId(cid);
+            recovered = true;
+          }
+        }
+        if (!recovered) {
+          // Genuine failure: drop the placeholder and mark the local message
+          // failed (with inline retry) instead of leaving a ghost message.
+          setMessages((prev) =>
+            prev
+              .filter((m) => m.id !== assistantId)
+              .map((m) => (m.id === userMsg.id ? { ...m, failed: true } : m)),
+          );
+          setError(t(lang, isTimeout ? 'chat.errTimeout' : 'chat.error'));
+        }
+      } finally {
+        setSending(false);
+        setStreamActive(false);
+        setStatusPhase(null);
+      }
+    },
+    [token, conversationId, lang, reloadMessages, serverHasReply, findReplyInRecentConversations],
+  );
+
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || sending || !token) return;
     setInput('');
-    setError('');
-    const userMsg: ChatMessage = { id: nextId(), role: 'user', text, createdAt: Date.now() };
-    const withUser = [...messages, userMsg];
-    const assistantId = nextId();
-    const placeholder: ChatMessage = {
-      id: assistantId,
-      role: 'assistant',
-      text: '',
-      createdAt: Date.now(),
-    };
-    setMessages([...withUser, placeholder]);
-    setSending(true);
-    setStreamActive(false);
-    try {
-      let streamed = '';
-      const meta = await api.chatStream(token, { message: text, conversationId }, (tok) => {
-        streamed += tok;
-        const snapshot = streamed;
-        setStreamActive(true);
-        setMessages((prev) =>
-          prev.map((m) => (m.id === assistantId ? { ...m, text: snapshot } : m)),
-        );
-      });
-      setConversationId(meta.conversationId);
-      // Reload to sync backend ids (needed for pin) and persisted citations.
-      await reloadMessages(meta.conversationId);
-    } catch {
-      try {
-        const res = await api.chat(token, { message: text, conversationId });
-        setConversationId(res.conversationId);
-        await reloadMessages(res.conversationId);
-      } catch {
-        setError(t(lang, 'chat.error'));
-        setMessages(withUser);
-      }
-    } finally {
-      setSending(false);
-      setStreamActive(false);
-    }
-  }, [input, sending, token, messages, conversationId, lang, reloadMessages]);
+    await doSend(text);
+  }, [input, sending, token, doSend]);
 
-  const regenerate = useCallback(async () => {
-    if (sending || !token || !conversationId) return;
+  const retrySend = useCallback(
+    async (msg: ChatMessage) => {
+      if (sending || !token) return;
+      setError('');
+      // The original send may have completed server-side after all; check
+      // before resending so a retry can never create a duplicate.
+      let recovered = false;
+      if (conversationId) {
+        recovered = await serverHasReply(conversationId, msg.text);
+      } else {
+        const cid = await findReplyInRecentConversations(msg.text);
+        if (cid) {
+          setConversationId(cid);
+          recovered = true;
+        }
+      }
+      setMessages((prev) => prev.filter((m) => m.id !== msg.id));
+      if (!recovered) {
+        await doSend(msg.text);
+      }
+    },
+    [sending, token, conversationId, serverHasReply, findReplyInRecentConversations, doSend],
+  );
+
+  /** Regenerate core (no sending guard) — reused by the edit flow. */
+  const runRegenerate = useCallback(async () => {
+    if (!token || !conversationId) return;
     setError('');
     setSending(true);
     try {
@@ -234,7 +390,77 @@ export default function ChatScreen() {
     } finally {
       setSending(false);
     }
-  }, [sending, token, conversationId, lang, reloadMessages]);
+  }, [token, conversationId, lang, reloadMessages]);
+
+  const regenerate = useCallback(() => {
+    if (sending) return;
+    void runRegenerate();
+  }, [sending, runRegenerate]);
+
+  /** Long-press on a persisted user bubble → edit action (same Alert affordance as conversation delete). */
+  const startEdit = useCallback(
+    (msg: ChatMessage) => {
+      if (sending || !msg.backendId || msg.failed) return;
+      Alert.alert(t(lang, 'chat.editMessage'), undefined, [
+        { text: t(lang, 'chat.cancelEdit'), style: 'cancel' },
+        {
+          text: t(lang, 'chat.editMessage'),
+          onPress: () => {
+            setEditingId(msg.id);
+            setEditDraft(msg.text);
+          },
+        },
+      ]);
+    },
+    [sending, lang],
+  );
+
+  /**
+   * Save an edited user message (ChatGPT-style): the server updates the
+   * content and drops every later message; we mirror that locally, then run
+   * the same regenerate flow to stream the fresh answer.
+   */
+  const saveEdit = useCallback(async () => {
+    if (!token || !editingId || sending || !conversationId) return;
+    const text = editDraft.trim();
+    if (!text) {
+      setError(t(lang, 'chat.editFailed'));
+      return;
+    }
+    const editedId = editingId;
+    setError('');
+    setSending(true);
+    try {
+      const target = messages.find((m) => m.id === editedId);
+      if (!target?.backendId) {
+        setError(t(lang, 'chat.editFailed'));
+        return;
+      }
+      await api.messages.edit(token, target.backendId, text);
+      // Mirror the server: update the edited message, drop everything after it.
+      setMessages((prev) => {
+        const i = prev.findIndex((m) => m.id === editedId);
+        if (i < 0) return prev;
+        return prev.slice(0, i + 1).map((m, j) => (j === i ? { ...m, text } : m));
+      });
+      setEditingId(null);
+      setEditDraft('');
+      await runRegenerate();
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'PINNED_AFTER') {
+        Alert.alert(t(lang, 'chat.editBlockedPinned'));
+      } else {
+        setError(t(lang, 'chat.editFailed'));
+      }
+    } finally {
+      setSending(false);
+    }
+  }, [token, editingId, editDraft, sending, conversationId, lang, messages, runRegenerate]);
+
+  const cancelEdit = useCallback(() => {
+    setEditingId(null);
+    setEditDraft('');
+  }, []);
 
   const copyMsg = useCallback(
     async (text: string) => {
@@ -274,10 +500,62 @@ export default function ChatScreen() {
 
   const renderItem = ({ item, index }: { item: ChatMessage; index: number }) => {
     if (item.role === 'user') {
+      if (editingId === item.id) {
+        return (
+          <View style={[styles.bubble, styles.userBubble, rtl && styles.userBubbleRtl]}>
+            <TextInput
+              style={[styles.editInput, { textAlign: rtl ? 'right' : 'left' }]}
+              value={editDraft}
+              onChangeText={setEditDraft}
+              multiline
+              maxLength={4000}
+              autoFocus
+              editable={!sending}
+            />
+            <View style={styles.editBtnRow}>
+              <TouchableOpacity
+                style={[styles.editBtn, styles.editBtnPrimary]}
+                onPress={() => void saveEdit()}
+                disabled={sending}
+                hitSlop={10}
+                accessibilityLabel={t(lang, 'chat.saveEdit')}
+              >
+                <Text style={styles.editBtnPrimaryLabel}>{t(lang, 'chat.saveEdit')}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.editBtn}
+                onPress={cancelEdit}
+                disabled={sending}
+                hitSlop={10}
+                accessibilityLabel={t(lang, 'chat.cancelEdit')}
+              >
+                <Text style={styles.editBtnLabel}>{t(lang, 'chat.cancelEdit')}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        );
+      }
       return (
-        <View style={[styles.bubble, styles.userBubble, rtl && styles.userBubbleRtl]}>
+        <TouchableOpacity
+          style={[styles.bubble, styles.userBubble, rtl && styles.userBubbleRtl]}
+          activeOpacity={0.85}
+          onLongPress={() => startEdit(item)}
+          delayLongPress={350}
+          disabled={sending}
+        >
           <Text style={styles.userText}>{item.text}</Text>
-        </View>
+          {item.failed ? (
+            <TouchableOpacity
+              style={styles.retryBtn}
+              onPress={() => void retrySend(item)}
+              hitSlop={10}
+              accessibilityLabel={t(lang, 'common.retry')}
+            >
+              <MaterialIcons name="refresh" size={16} color={colors.bubbleUserText} />
+              <Text style={styles.retryLabel}>{t(lang, 'common.retry')}</Text>
+            </TouchableOpacity>
+          ) : null}
+        </TouchableOpacity>
       );
     }
     return (
@@ -311,7 +589,10 @@ export default function ChatScreen() {
       {offline ? (
         <View style={styles.offlineBanner}>
           <MaterialIcons name="cloud-off" size={16} color={colors.warning} />
-          <Text style={styles.offlineText}>{t(lang, 'common.offline')}</Text>
+          <Text style={styles.offlineText}>
+            {t(lang, 'common.offline')}
+            {offlineAt ? ` ${t(lang, 'common.offlineSavedAt')} ${new Date(offlineAt).toLocaleDateString(lang === 'ar' ? 'ar' : 'en')}` : ''}
+          </Text>
         </View>
       ) : null}
       {error ? (
@@ -326,7 +607,9 @@ export default function ChatScreen() {
         renderItem={renderItem}
         contentContainerStyle={styles.list}
         onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
-        ListFooterComponent={sending && !streamActive ? <TypingBubble /> : null}
+        ListFooterComponent={
+          sending && !streamActive ? <TypingBubble label={phaseLabel(statusPhase, lang)} /> : null
+        }
       />
       <View style={styles.composer}>
         <TextInput
@@ -372,6 +655,23 @@ const styles = StyleSheet.create({
   userBubble: { alignSelf: 'flex-end', backgroundColor: colors.bubbleUser, borderBottomRightRadius: 4 },
   userBubbleRtl: { borderBottomRightRadius: radius.lg, borderBottomLeftRadius: 4 },
   userText: { color: colors.bubbleUserText, fontSize: fontSize.md, fontFamily: fontFamily.regular },
+  retryBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    marginTop: spacing.xs, padding: 6, alignSelf: 'flex-end',
+  },
+  retryLabel: { fontFamily: fontFamily.medium, fontSize: fontSize.xs, color: colors.bubbleUserText },
+  editInput: {
+    color: colors.bubbleUserText, fontSize: fontSize.md, fontFamily: fontFamily.regular,
+    minHeight: 60, textAlignVertical: 'top',
+  },
+  editBtnRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.sm, justifyContent: 'flex-end' },
+  editBtn: {
+    paddingHorizontal: spacing.md, paddingVertical: 8,
+    borderRadius: radius.md, borderWidth: 1, borderColor: 'rgba(255,255,255,0.4)',
+  },
+  editBtnPrimary: { backgroundColor: '#fff', borderColor: '#fff' },
+  editBtnLabel: { fontFamily: fontFamily.medium, fontSize: fontSize.sm, color: '#fff' },
+  editBtnPrimaryLabel: { fontFamily: fontFamily.medium, fontSize: fontSize.sm, color: colors.bubbleUser },
   assistantBubble: { alignSelf: 'stretch', backgroundColor: colors.bubbleAssistant, borderBottomLeftRadius: 4 },
   assistantText: { color: colors.text, fontSize: fontSize.md, fontFamily: fontFamily.regular },
   actions: {
@@ -383,6 +683,7 @@ const styles = StyleSheet.create({
   actionLabel: { fontFamily: fontFamily.medium, fontSize: fontSize.xs, color: colors.textMuted },
   typingRow: { flexDirection: 'row', gap: 6, paddingVertical: 4 },
   typingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: colors.textMuted, opacity: 0.6 },
+  typingLabel: { fontSize: fontSize.xs, fontFamily: fontFamily.regular, color: colors.textMuted, marginTop: 6 },
   composer: {
     flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm,
     padding: spacing.md, borderTopWidth: 1, borderTopColor: colors.border,

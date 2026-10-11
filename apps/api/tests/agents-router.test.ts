@@ -104,3 +104,92 @@ describe('route', () => {
     expect(d.emergency!.category).toBe('respiratory_arrest');
   });
 });
+
+/**
+ * Safety policy v2.0-draft §4.1 — emergency detection test-plan IDs.
+ * E-01: clear acute reports → ESCALATE (via detectEmergency hit).
+ * E-02: dialectal / misspelled Arabic life-threats must be caught.
+ * E-03: mixed Arabic/English reports.
+ * E-04: explicit educational questions must NOT escalate.
+ * E-05: MH / LAST suspicion in a current patient → escalate.
+ * E-09: escalation text must not invent an ambulance number.
+ */
+describe('detectEmergency — policy v2.0 test plan', () => {
+  // E-01: clear acute reports
+  it.each([
+    ['المريض توقف قلبه', 'cardiac_arrest'],
+    ['لا يوجد نبض عند المريض', 'cardiac_arrest'],
+    ['المريض توقف عن التنفس', 'respiratory_arrest'],
+    ['نزيف حاد لا يتوقف', 'severe_bleeding'],
+  ])('E-01 hits acute report: %s', (phrase, category) => {
+    const hit = detectEmergency(phrase);
+    expect(hit).not.toBeNull();
+    expect(hit!.category).toBe(category);
+  });
+
+  // E-02: Yemeni/Gulf dialect variants (policy §4.1)
+  it.each([
+    ['قلبه وقف', 'cardiac_arrest'],
+    ['المريض توقف قلبه', 'cardiac_arrest'],
+    ['ما يتنفس', 'respiratory_arrest'],
+    ['مب قادر يتنفس', 'respiratory_arrest'],
+    ['مو قادر يتنفس', 'respiratory_arrest'],
+    ['نزيف قوي', 'severe_bleeding'],
+    ['ينزف بقوة', 'severe_bleeding'],
+    ['ضغطه نازل 70/40', 'shock'],
+    ['عنده حساسيه من البنج', 'anaphylaxis'],
+    ['عنده حساسية من البنج', 'anaphylaxis'], // orthographic variant ة/ه
+    ['يتشنج المريض', 'seizure'],
+  ])('E-02 hits dialect emergency: %s', (phrase, category) => {
+    const hit = detectEmergency(phrase);
+    expect(hit).not.toBeNull();
+    expect(hit!.category).toBe(category);
+  });
+
+  // E-03: mixed Arabic/English
+  it.each([
+    'patient قلبه وقف',
+    'المريض cardiac arrest',
+    'عنده anaphylaxis بعد البنج',
+  ])('E-03 hits mixed-language report: %s', (phrase) => {
+    expect(detectEmergency(phrase)).not.toBeNull();
+  });
+
+  // E-04: educational questions must NOT escalate
+  it.each([
+    'ما هو تعريف توقف القلب؟',
+    'ما تعريف الصدمة التحسسية؟',
+    'عرف لي توقف التنفس',
+    'اشرح لي أسباب توقف القلب',
+    'what is the definition of cardiac arrest?',
+  ])('E-04 does not escalate educational question: %s', (phrase) => {
+    expect(detectEmergency(phrase)).toBeNull();
+  });
+
+  it('E-04 still escalates when acute markers accompany the question', () => {
+    // Conservative: a real report wins over the educational phrasing.
+    expect(detectEmergency('ما هو تعريف توقف القلب؟ المريض قلبه وقف الآن')).not.toBeNull();
+  });
+
+  // E-05: MH / LAST suspicion in a current patient
+  it.each([
+    'اشتباه فرط حرارة خبيث عند المريض',
+    'المريض حرارته ترتفع بعد البنج اشتباه فرط حرارة خبيث',
+    'المريض عنده تسمم بالمخدر الموضعي',
+    'اشتباه سمية مخدر موضعي، المريض يتدهور',
+  ])('E-05 escalates MH/LAST suspicion: %s', (phrase) => {
+    expect(detectEmergency(phrase)).not.toBeNull();
+  });
+
+  it('E-05 does not escalate pure knowledge questions about MH/LAST', () => {
+    expect(detectEmergency('ما هو علاج فرط الحرارة الخبيث؟')).toBeNull();
+    expect(detectEmergency('dantrolene dose for malignant hyperthermia')).toBeNull();
+  });
+});
+
+describe('normalizeArabic', () => {
+  it('maps أ/إ/آ→ا، ة→ه، ى→ي', async () => {
+    const { normalizeArabic } = await import('../src/agents/router.js');
+    expect(normalizeArabic('أحمد إسلام آية حساسية منى')).toBe('احمد اسلام ايه حساسيه مني');
+  });
+});

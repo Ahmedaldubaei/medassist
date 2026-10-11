@@ -12,6 +12,17 @@ import { t } from '../../i18n';
 import { colors, fontFamily, fontSize, radius, spacing } from '../../theme';
 import { EmptyState, ErrorBanner, LoadingView } from '../../components/ui';
 
+function Disclaimer({ lang }: { lang: 'ar' | 'en' }) {
+  return (
+    <View style={styles.disclaimer}>
+      <MaterialIcons name="info-outline" size={16} color={colors.info} />
+      <Text style={[styles.disclaimerText, { textAlign: lang === 'ar' ? 'right' : 'left' }]}>
+        {t(lang, 'drugs.disclaimer')}
+      </Text>
+    </View>
+  );
+}
+
 function DrugCard({ drug, lang }: { drug: DrugItem; lang: 'ar' | 'en' }) {
   const rtl = lang === 'ar';
   const align = { textAlign: (rtl ? 'right' : 'left') as 'right' | 'left' };
@@ -96,6 +107,7 @@ export default function DrugsScreen() {
         />
       </View>
       {err ? <ErrorBanner message={err} /> : null}
+      <Disclaimer lang={lang} />
       <FlatList
         data={drugs ?? []}
         keyExtractor={(d) => d.nameEn}
@@ -129,4 +141,10 @@ const styles = StyleSheet.create({
   dose: { fontFamily: fontFamily.bold, fontSize: fontSize.md, color: colors.text },
   meta: { fontFamily: fontFamily.regular, fontSize: fontSize.sm, color: colors.textMuted, marginTop: 4 },
   source: { fontFamily: fontFamily.regular, fontSize: fontSize.xs, color: colors.textMuted, marginTop: 6, fontStyle: 'italic' },
+  disclaimer: {
+    flexDirection: 'row', gap: spacing.xs, alignItems: 'flex-start',
+    marginHorizontal: spacing.md, marginBottom: spacing.sm,
+    padding: spacing.md, backgroundColor: colors.infoSoft, borderRadius: radius.md,
+  },
+  disclaimerText: { flex: 1, fontFamily: fontFamily.regular, fontSize: fontSize.xs, color: colors.text },
 });

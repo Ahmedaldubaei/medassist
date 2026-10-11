@@ -20,11 +20,9 @@ export function buildApp() {
   // from the web app are answered. Without this, every web API call is
   // blocked by the browser and surfaces as a misleading "network" error.
   app.register(cors, {
-    origin: [
-      'https://medassist-app-sun3.onrender.com',
-      'http://localhost:8081',
-      'http://localhost:19006',
-    ],
+    // P3: origins come from CORS_ORIGINS env (comma-separated); the default
+    // matches the previously hardcoded list.
+    origin: config.CORS_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean),
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
   });

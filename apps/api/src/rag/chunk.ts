@@ -32,10 +32,16 @@ export function cleanHtml(html: string): string {
   return text.replace(/[ \t\u00a0]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-/** Split text into sentences (simple, language-agnostic). */
+/** Split text into sentences (language-aware). */
 export function splitSentences(text: string): string[] {
+  // Arabic text: split after sentence-ending punctuation (including ؟ ؛ …)
+  // followed by whitespace, regardless of the next character's case —
+  // the Latin lookahead below would almost never match Arabic script.
+  const pattern = /[\u0600-\u06FF]/.test(text)
+    ? /(?<=[.!?؟؛…])\s+/
+    : /(?<=[.!?;])\s+(?=[A-Z0-9"'“\(\[])/;
   return text
-    .split(/(?<=[.!?;])\s+(?=[A-Z0-9"'“\(\[])/)
+    .split(pattern)
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
 }

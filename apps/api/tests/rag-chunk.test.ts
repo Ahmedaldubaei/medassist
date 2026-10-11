@@ -23,6 +23,25 @@ describe('splitSentences', () => {
     const parts = splitSentences('First sentence. Second one! Is this third? Yes.');
     expect(parts.length).toBe(4);
   });
+
+  it('does not split on abbreviations or decimals in Latin text', () => {
+    const parts = splitSentences('The dose is 2.5 mg. Give it slowly.');
+    expect(parts).toHaveLength(2);
+  });
+
+  it('splits Arabic sentences at ؟ and . regardless of next-char case', () => {
+    const text = 'فرط الحرارة الخبيث حالة طارئة. يجب إيقاف المحفزات فورًا؟ نعم، هذا صحيح! العلاج دانترولين؛ والتبريد مهم.';
+    const parts = splitSentences(text);
+    expect(parts).toHaveLength(5);
+    expect(parts[0]).toBe('فرط الحرارة الخبيث حالة طارئة.');
+    expect(parts[1]).toBe('يجب إيقاف المحفزات فورًا؟');
+    expect(parts[3]).toBe('العلاج دانترولين؛');
+  });
+
+  it('splits mixed Arabic/Latin text on Arabic punctuation', () => {
+    const parts = splitSentences('التخدير مهم. anesthesia is critical. هل هذا واضح؟ نعم.');
+    expect(parts).toHaveLength(4);
+  });
 });
 
 describe('chunkText (MedRAG pattern: 1000/200)', () => {

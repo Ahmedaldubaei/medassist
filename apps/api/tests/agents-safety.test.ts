@@ -148,3 +148,134 @@ describe('postCheck', () => {
     expect(disclaimerFor('en')).toContain('not a substitute for an anesthesiologist');
   });
 });
+
+/**
+ * Safety policy v2.0-draft — test-plan IDs.
+ * E-09: escalation text must not invent an ambulance number (policy §4.2).
+ */
+describe('E-09 escalation text', () => {
+  const PHONE_LIKE = /\+?\d[\d\s.\-()]{6,}\d/;
+  it.each(['ar', 'en'] as const)('contains no phone-number pattern (%s)', (lang) => {
+    const r = preCheck(lang === 'ar' ? 'قلبه وقف' : 'cardiac arrest now', lang);
+    expect(r.escalate).toBe(true);
+    expect(PHONE_LIKE.test(r.text)).toBe(false);
+  });
+  it('directs to the local emergency system without assuming a number', () => {
+    const r = preCheck('قلبه وقف', 'ar');
+    expect(r.text).toMatch(/الطوارئ المحلي|الإسعاف/);
+  });
+});
+
+/**
+ * Dosage extraction hardening (policy §7, tests D-01..D-12 unit-testable subset).
+ */
+describe('extractDosages — normalization (D-01..D-12 subset)', () => {
+  it('detects Arabic-Indic digits: "٠٫٥ ملغ" → 0.5 ملغ', () => {
+    const ds = extractDosages('أعط ٠٫٥ ملغ من الدواء');
+    expect(ds).toHaveLength(1);
+    expect(ds[0]!.numbers).toEqual(['0.5']);
+    expect(ds[0]!.unit).toBe('ملغ');
+  });
+  it('accepts comma decimals: "2,5 mg" → 2.5 mg (not 5 mg)', () => {
+    const ds = extractDosages('Give 2,5 mg IV');
+    expect(ds).toHaveLength(1);
+    expect(ds[0]!.numbers).toEqual(['2.5']);
+    expect(ds[0]!.unit).toBe('mg');
+  });
+  it('handles comma decimals in ranges', () => {
+    const ds = extractDosages('1,5-2,5 mg');
+    expect(ds[0]!.numbers).toEqual(['1.5', '2.5']);
+  });
+});
+
+describe('isDosageGrounded — route awareness (D-02)', () => {
+  const ivChunk = chunk('Give dantrolene 2.5 mg per kg intravenously.');
+  const dose = { raw: '2.5 mg', numbers: ['2.5'], unit: 'mg', index: 0 };
+  it('D-02: a dose stated for a DIFFERENT route is NOT grounded by the chunk', () => {
+    expect(isDosageGrounded(dose, [ivChunk], 'Give 2.5 mg IM now.')).toBe(false);
+  });
+  it('grounds when the route matches', () => {
+    expect(isDosageGrounded(dose, [ivChunk], 'Give 2.5 mg IV now.')).toBe(true);
+  });
+  it('grounds when the draft states no route (permissive fallback)', () => {
+    expect(isDosageGrounded(dose, [ivChunk])).toBe(true);
+  });
+  it('handles Arabic route terms', () => {
+    const arChunk = chunk('أعط الدواء 2.5 ملغ وريديا.');
+    expect(isDosageGrounded({ raw: '2.5 ملغ', numbers: ['2.5'], unit: 'ملغ', index: 0 }, [arChunk], 'أعط 2.5 ملغ وريدي.')).toBe(true);
+    expect(isDosageGrounded({ raw: '2.5 ملغ', numbers: ['2.5'], unit: 'ملغ', index: 0 }, [arChunk], 'أعط 2.5 ملغ عضلي.')).toBe(false);
+  });
+});
+
+describe('postCheck — D-07 multi-paragraph strip and re-verify', () => {
+  const chunks = [chunk('Dantrolene dosing starts at 2.5 mg per kg intravenously.')];
+  it('D-07: strips the ungrounded-dose sentence, keeps the rest, verdict FLAG', () => {
+    const draft =
+      'Malignant hyperthermia is a pharmacogenetic emergency. ' +
+      'Give dantrolene 2.5 mg/kg IV immediately [1]. ' +
+      'Also administer 999 mg of midazolam now for sedation.';
+    const r = postCheck({ draft, chunks, lang: 'en' });
+    expect(r.verdict).toBe('FLAG');
+    expect(r.text).toContain('2.5 mg/kg');
+    expect(r.text).not.toContain('999 mg');
+    expect(r.text).toContain('pharmacogenetic emergency');
+    // Re-verify: the sanitized output must itself pass cleanly (G-07).
+    const r2 = postCheck({ draft: r.text, chunks, lang: 'en' });
+    expect(r2.verdict).toBe('PASS');
+  });
+});
+
+/**
+ * Verdict taxonomy (policy §9.3, tests G-01..G-07).
+ */
+describe('SafetyVerdict taxonomy (G-01..G-07)', () => {
+  it('G-01: clean grounded draft → PASS', async () => {
+    const { SAFETY_VERDICTS } = await import('../src/agents/safety.js');
+    expect(SAFETY_VERDICTS).toEqual(['PASS', 'FLAG', 'CLARIFY', 'ESCALATE', 'BLOCK', 'SAFE_FALLBACK']);
+    const r = postCheck({
+      draft: 'Give dantrolene 2.5 mg/kg IV [1].',
+      chunks: [chunk('Dantrolene 2.5 mg per kg intravenously.')],
+      lang: 'en',
+    });
+    expect(r.verdict).toBe('PASS');
+  });
+  it('G-02: corrected non-critical issue → FLAG', () => {
+    const r = postCheck({
+      draft: 'Dantrolene works [1]. See the famous study [9].',
+      chunks: [chunk('Dantrolene 2.5 mg per kg intravenously.')],
+      lang: 'en',
+    });
+    expect(r.verdict).toBe('FLAG');
+    expect(r.checks.find((c) => c.name === 'citation_verification')!.passed).toBe(false);
+  });
+  it('G-04: emergency preCheck maps to ESCALATE verdict', () => {
+    // Verdict assignment happens in pipeline.ts; the taxonomy carries it.
+    const r = preCheck('قلبه وقف', 'ar');
+    expect(r.escalate).toBe(true);
+  });
+  it('G-05: unsafe dose-centric content → BLOCK', () => {
+    const r = postCheck({ draft: 'Give 100 mg now.', chunks: [], lang: 'en' });
+    expect(r.verdict).toBe('BLOCK');
+  });
+  it('G-06: SAFE_FALLBACK message contains no medical claims or doses', async () => {
+    const { safeFallbackText, extractDosages } = await import('../src/agents/safety.js');
+    for (const lang of ['ar', 'en'] as const) {
+      const t = safeFallbackText(lang);
+      expect(extractDosages(t)).toHaveLength(0);
+      expect(t).not.toMatch(/mg|ملغ|جرعة|dose/i);
+    }
+    expect(safeFallbackText('ar')).toContain('عطل فني');
+  });
+  it('G-07: postCheck output is stable under re-check (no new violations introduced)', () => {
+    const draft = 'Give dantrolene 2.5 mg/kg IV [1]. Also give 100 mg bolus [1].';
+    const chunks = [chunk('Dantrolene 2.5 mg per kg intravenously.')];
+    const once = postCheck({ draft, chunks, lang: 'en' });
+    const twice = postCheck({ draft: once.text, chunks, lang: 'en' });
+    expect(twice.text).toBe(once.text);
+    expect(twice.verdict).toBe('PASS');
+  });
+  it('policy version constant is 2.0-draft', async () => {
+    const { POLICY_VERSION } = await import('../src/agents/safety.js');
+    expect(POLICY_VERSION).toBe('2.0-draft');
+  });
+});

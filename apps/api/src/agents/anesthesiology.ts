@@ -5,7 +5,9 @@
  */
 import { getAgent } from './registry.js';
 import {
+  emitPhase,
   formatChunksForPrompt,
+  formatHistoryForPrompt,
   noEvidenceResponse,
   retrieveChunks,
   type AgentRunInput,
@@ -14,16 +16,18 @@ import {
 
 export async function runAnesthesiologyAgent(input: AgentRunInput): Promise<AgentRunOutput> {
   const def = getAgent('anesthesiology');
-  const chunks = await retrieveChunks(input.query, def, input.embedProvider, input.timings);
+  const chunks = await retrieveChunks(input.query, def, input.embedProvider, input.timings, input.onPhase);
   if (chunks.length === 0) {
     return { draft: noEvidenceResponse(input.lang, input.query), chunks, agentId: 'anesthesiology' };
   }
+  emitPhase(input, 'generating');
   const { text } = await input.llm.complete(
     [
       { role: 'system', content: def.systemPrompt(input.lang) },
       {
         role: 'user',
         content:
+          formatHistoryForPrompt(input.history, input.lang) +
           (input.lang === 'ar'
             ? `سؤال من استشاري تخدير: ${input.query}\n\nالمصادر الموثقة (تخدير):\n${formatChunksForPrompt(chunks)}\n\n`
             : `Question from an anesthesia consultant: ${input.query}\n\nVerified sources (anesthesiology):\n${formatChunksForPrompt(chunks)}\n\n`) +

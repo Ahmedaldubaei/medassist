@@ -97,6 +97,8 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [offline, setOffline] = useState(false);
+  /** M7: timestamp of the cached copy being shown (null when online). */
+  const [offlineAt, setOfflineAt] = useState<number | null>(null);
   const [q, setQ] = useState('');
   const [hits, setHits] = useState<MessageSearchHit[] | null>(null);
 
@@ -106,9 +108,10 @@ export default function HomeScreen() {
     if (!token) return;
     try {
       setLoadError('');
-      const { data, fromCache } = await listConversationsCached(token, scope);
+      const { data, fromCache, cachedAt } = await listConversationsCached(token, scope);
       setConvs(data.conversations);
       setOffline(fromCache);
+      setOfflineAt(fromCache ? (cachedAt ?? null) : null);
     } catch {
       setLoadError(t(lang, 'chat.errLoad'));
     }
@@ -118,6 +121,7 @@ export default function HomeScreen() {
     useCallback(() => {
       setConvs(null);
       setOffline(false);
+      setOfflineAt(null);
       void load();
     }, [load]),
   );
@@ -178,7 +182,10 @@ export default function HomeScreen() {
       {offline ? (
         <View style={styles.offlineBanner}>
           <MaterialIcons name="cloud-off" size={16} color={colors.warning} />
-          <Text style={styles.offlineText}>{t(lang, 'common.offline')}</Text>
+          <Text style={styles.offlineText}>
+            {t(lang, 'common.offline')}
+            {offlineAt ? ` ${t(lang, 'common.offlineSavedAt')} ${new Date(offlineAt).toLocaleDateString(lang === 'ar' ? 'ar' : 'en')}` : ''}
+          </Text>
         </View>
       ) : null}
 
